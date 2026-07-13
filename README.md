@@ -15,8 +15,14 @@
 
 ## ドキュメント
 
+- [設計資料一覧](docs/README.md)
 - [作品コンセプト](docs/concept.md)
 - [システム構成](docs/architecture.md)
+- [データモデル](docs/data-model.md)
+- [API・WebSocket仕様](docs/api.md)
+- [参加セッション状態遷移](docs/state-machine.md)
+- [位置座標・3D座標変換](docs/coordinate-mapping.md)
+- [配置・展示運用・障害対応](docs/deployment-operations.md)
 - [機材構成](docs/hardware.md)
 - [プライバシー設計](docs/privacy.md)
 - [ロードマップ](docs/roadmap.md)
@@ -24,4 +30,3 @@
 ## 現在のフェーズ
 
 計画・技術検証。最初の重点は、実際のキャンパスにおけるスマートフォンの位置取得精度と通信安定性の検証です。
-
