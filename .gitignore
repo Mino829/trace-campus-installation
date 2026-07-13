@@ -1,0 +1,32 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# JavaScript / Next.js
+node_modules/
+.next/
+out/
+
+# Go
+bin/
+*.test
+coverage.out
+
+# Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+
+# TouchDesigner
+*.toe.autosave
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
