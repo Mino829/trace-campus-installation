@@ -16,16 +16,22 @@
 ## ドキュメント
 
 - [設計資料一覧](docs/README.md)
+- [企画概要](docs/proposal.md)
 - [作品コンセプト](docs/concept.md)
+- [スコープ・要件定義](docs/scope-requirements.md)
+- [参加者ジャーニー・画面要件](docs/user-journey.md)
 - [システム構成](docs/architecture.md)
 - [データモデル](docs/data-model.md)
 - [API・WebSocket仕様](docs/api.md)
-- [参加セッション状態遷移](docs/state-machine.md)
+- [参加追跡・到着演出の状態遷移](docs/state-machine.md)
 - [位置座標・3D座標変換](docs/coordinate-mapping.md)
 - [配置・展示運用・障害対応](docs/deployment-operations.md)
 - [機材構成](docs/hardware.md)
 - [プライバシー設計](docs/privacy.md)
 - [ロードマップ](docs/roadmap.md)
+- [プロジェクト計画・意思決定](docs/project-plan.md)
+- [リスク台帳](docs/risk-register.md)
+- [試験計画・公開判定基準](docs/test-plan.md)
 
 ## 現在のフェーズ
 
