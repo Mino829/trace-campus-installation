@@ -1,8 +1,8 @@
 # TRACE — Campus Movement Installation
 
-大学キャンパスを歩く参加者の匿名化された位置と軌跡を、リアルタイム3DCGとして展示するインタラクティブアート・プロジェクトです。
+大学キャンパスを歩く参加者が撮影した写真を思い出の節目とし、写真間の移動をGPSとキャンパス経路から再構成してリアルタイム3DCGへ変換するインタラクティブアート・プロジェクトです。
 
-参加者はキャンパス入口のQRコードからWebアプリを開き、位置情報の利用に同意して参加します。展示場では、現在キャンパス内を移動する人々が光・粒子・生命体として表示されます。参加者が展示場へ到着すると、入口から展示場までの軌跡が時間圧縮されて再生され、集合アートへ加わります。
+参加者はキャンパス入口のQRコードからWebアプリを開き、写真と位置情報の利用に同意して参加します。歩きながら残したい瞬間を撮影すると、撮影地点が記憶のアンカーになります。展示場へ到着すると、写真間の再構成経路が時間圧縮されて再生され、本人のスマートフォンには写真ストーリーが残ります。公開スクリーンには原写真を出さず、光、色、粒子、経路として抽象化します。
 
 ## 技術構成
 
@@ -11,15 +11,19 @@
 - Realtime: WebSocket
 - Rendering: Unity または TouchDesigner
 - Storage: SQLite（MVP）、PostgreSQL（拡張時）
+- Photo Storage: 非公開オブジェクトストレージ
+- Route Reconstruction: バージョン付きキャンパス経路グラフ / A*またはDijkstra
 - Arrival: QRコード、将来的にNFC
 
 ## ドキュメント
 
+- [現在計画・会議共有用](docs/current-plan.md)
 - [設計資料一覧](docs/README.md)
 - [企画概要](docs/proposal.md)
 - [作品コンセプト](docs/concept.md)
 - [スコープ・要件定義](docs/scope-requirements.md)
 - [参加者ジャーニー・画面要件](docs/user-journey.md)
+- [写真メモリー・経路再構成仕様](docs/photo-memory.md)
 - [システム構成](docs/architecture.md)
 - [データモデル](docs/data-model.md)
 - [API・WebSocket仕様](docs/api.md)

@@ -5,6 +5,7 @@
 追跡の終了と軌跡演出の進行は別の関心事である。到着すると追跡は即座に停止する一方、演出は待機・再生・完了へ進むため、二つの状態機械として管理する。
 
 - `ParticipantSession.tracking_status`: 位置点を受け付けるか
+- `PhotoAsset.status`: 写真の送信・検証・削除状態
 - `ArrivalEvent.replay_status`: 到着演出がどこまで進んだか
 
 通信切断は永続状態にしない。`last_seen_at`から運営画面が`degraded`と判定し、再接続時は有効期限内の同じセッションを継続する。
@@ -33,6 +34,31 @@ stateDiagram-v2
 | `tracking` | `participant.arrived` | `stopped` | 最終有効位置を確定し、到着作成と同じトランザクションで停止 |
 | `tracking` | `tracking.stop` | `stopped` | `stop_reason`を記録し、以降の位置点を拒否 |
 | `tracking` | `session.expire` | `expired` | トークンを無効化し、以降の位置点を拒否 |
+
+## 写真状態
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending: photo metadata accepted
+    Pending --> Ready: upload and validation complete
+    Pending --> Failed: timeout or validation failure
+    Ready --> Deleting: participant or session deletes
+    Failed --> Deleting: cleanup
+    Deleting --> [*]: object and records removed
+```
+
+| 状態 | 内容 |
+|---|---|
+| `pending` | メタデータ作成済み、画像送信または検証待ち |
+| `ready` | 非公開保存と検証が完了し、本人用ストーリーで利用可能 |
+| `failed` | 送信期限切れ、形式・容量・EXIF検証失敗 |
+| `deleting` | オブジェクトと派生データを削除中 |
+
+- 同じ`clientPhotoId`、ハッシュ、冪等性キーは一つのPhotoMomentへ対応させる
+- 画像検証に失敗した場合はオブジェクトを削除し、公開描画イベントを送らない
+- 写真単位削除では前後のRouteSegmentを無効化し、残りの写真とGPSから再生成する
+- 到着時に`pending`写真がある場合は暫定15秒待ち、完了しなければその写真を除いて演出を生成する
+- 写真0枚・1枚でも到着演出とセッション終了を妨げない
 
 ## 到着演出状態
 
@@ -74,7 +100,7 @@ stateDiagram-v2
 
 ## 削除
 
-削除は状態遷移ではなくデータ消去である。参加者による削除または`delete_after`到来時に、ParticipantSession、PositionPoint、ArrivalEvent、参加トークンハッシュを削除する。削除後は同じトークンで状態を復元できない。同じ削除要求の安全な再送に限り、位置やセッション内容を持たない短期の冪等性記録から成功結果を返す。
+セッション削除は状態遷移ではなくデータ消去である。参加者による削除または`delete_after`到来時に、ParticipantSession、PositionPoint、PhotoMoment、PhotoAsset、RouteSegment、ArrivalEvent、参加トークンハッシュを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。削除後は同じトークンで状態を復元できない。同じ削除要求の安全な再送に限り、写真、位置、セッション内容を持たない短期の冪等性記録から成功結果を返す。
 
 ## 異常系
 
