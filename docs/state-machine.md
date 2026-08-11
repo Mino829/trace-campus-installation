@@ -2,9 +2,10 @@
 
 ## 分離方針
 
-追跡の終了と軌跡演出の進行は別の関心事である。到着すると追跡は即座に停止する一方、演出は待機・再生・完了へ進むため、二つの状態機械として管理する。
+写真の思い出、リアルタイム位置、会場内フェーズ、到着演出は別の関心事として管理する。到着は演出を開始するが、リアルタイム位置を自動停止しない。
 
-- `ParticipantSession.tracking_status`: 位置点を受け付けるか
+- `LivePresenceSession.tracking_status`: 通常GPSの最新値を受け付けるか
+- `LivePresenceSession.presence_phase`: 来場前、到着、会場内、終了のどこか
 - `PhotoAsset.status`: 写真の送信・検証・削除状態
 - `ArrivalEvent.replay_status`: 到着演出がどこまで進んだか
 
@@ -15,7 +16,6 @@
 ```mermaid
 stateDiagram-v2
     [*] --> Tracking: consent accepted
-    Tracking --> Stopped: arrival accepted
     Tracking --> Stopped: participant or operator stops
     Tracking --> Expired: session timeout
     Stopped --> [*]
@@ -25,15 +25,32 @@ stateDiagram-v2
 | 状態 | 内容 | 位置点受付 |
 |---|---|---:|
 | `tracking` | 同意済みで追跡中 | Yes |
-| `stopped` | 到着、参加者、運営の操作により停止 | No |
+| `stopped` | 参加者、運営の操作により停止 | No |
 | `expired` | 追跡上限を過ぎて失効 | No |
 
 | 現在 | イベント | 次 | サーバー処理 |
 |---|---|---|---|
-| - | `session.created` | `tracking` | トークン、追跡失効、削除期限を発行 |
-| `tracking` | `participant.arrived` | `stopped` | 最終有効位置を確定し、到着作成と同じトランザクションで停止 |
+| - | `live_presence.created` | `tracking` | 専用トークン、追跡失効、削除期限を発行 |
 | `tracking` | `tracking.stop` | `stopped` | `stop_reason`を記録し、以降の位置点を拒否 |
-| `tracking` | `session.expire` | `expired` | トークンを無効化し、以降の位置点を拒否 |
+| `tracking` | `live_presence.expire` | `expired` | トークンを無効化し、以降の位置点を拒否 |
+
+## 会場内フェーズ
+
+```mermaid
+stateDiagram-v2
+    [*] --> Approaching: live presence created
+    Approaching --> Arrived: arrival accepted and linked
+    Arrived --> OnSite: additional consent accepted
+    Arrived --> Ended: participant stops
+    OnSite --> Ended: participant stops or session expires
+```
+
+- `approaching`: 展示場へ来る前。最新位置をキャンパス展示へ使う
+- `arrived`: 到着済み。撮影通知は終了するが、通常GPSの停止・会場内継続を選べる
+- `on_site`: 用途・粒度を示した追加同意後。原則エリア表示とし、精度不足時は操作時だけの表示へ落とす
+- `ended`: 表示終了。最新位置を削除する
+
+ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`への遷移は到着QRだけでは行わず、追加同意版を必須にする。
 
 ## 写真状態
 
@@ -56,7 +73,8 @@ stateDiagram-v2
 
 - 同じ`clientPhotoId`、ハッシュ、冪等性キーは一つのPhotoMomentへ対応させる
 - 画像検証に失敗した場合はオブジェクトを削除し、公開描画イベントを送らない
-- 写真単位削除では前後のRouteSegmentを無効化し、残りの写真とGPSから再生成する
+- 写真単位削除では前後のRouteSegmentを無効化し、残りの写真アンカーから再生成する
+- `ready`遷移時に短期の写真ピンを発行し、削除・期限切れ時に消去とフォトスポット減算を発行する
 - 到着時に`pending`写真がある場合は暫定15秒待ち、完了しなければその写真を除いて演出を生成する
 - 写真0枚・1枚でも到着演出とセッション終了を妨げない
 
@@ -92,15 +110,15 @@ stateDiagram-v2
 
 - 到着済みセッションへの到着要求は既存のArrivalEventを返す
 - 停止済みセッションへの停止要求は成功として現在状態を返す
-- `(session_id, client_point_id)`が同じ位置点は一度だけ適用する
+- LivePresenceSessionごとに通常GPSは最新1件だけを上書きし、古い`recordedAt`を拒否する
 - 描画機からの同じ`eventId`は一度だけ適用する
-- 到着取得と追跡停止を一つのDBトランザクションで行う
+- 到着作成と、有効なExperienceLinkを介した`presence_phase=arrived`更新を一つのDBトランザクションで行う
 - 演出開始は主描画機リースを持つ一台だけが確定できる
 - 終端状態から別の状態へ戻さない
 
 ## 削除
 
-セッション削除は状態遷移ではなくデータ消去である。参加者による削除または`delete_after`到来時に、ParticipantSession、PositionPoint、PhotoMoment、PhotoAsset、RouteSegment、ArrivalEvent、参加トークンハッシュを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。削除後は同じトークンで状態を復元できない。同じ削除要求の安全な再送に限り、写真、位置、セッション内容を持たない短期の冪等性記録から成功結果を返す。
+削除は状態遷移ではなくデータ消去である。MemorySession削除とLivePresenceSession削除を分け、「両方を削除」では各処理を独立して完了させる。片方を削除した時点でExperienceLinkを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。削除後は同じトークンで状態を復元できない。同じ削除要求の安全な再送に限り、写真、位置、セッション内容を持たない短期の冪等性記録から成功結果を返す。
 
 ## 異常系
 

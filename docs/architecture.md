@@ -32,7 +32,7 @@ Unity または TouchDesigner
 - カメラ撮影、プレビュー、向き補正、EXIF除去、縮小、再エンコード
 - `watchPosition` による位置取得
 - 緯度、経度、精度、時刻の送信
-- 追跡状態、最終更新、未送信状態の表示
+- リアルタイム状態と最終更新、写真の送信・再送状態の表示
 - 追跡停止、即時削除、署名付き到着チェックイン
 - 権限拒否・通信切断時の案内
 - 到着待ちの色・記号、順番、再生スキップの表示
@@ -40,13 +40,16 @@ Unity または TouchDesigner
 
 ## Go Backend
 
-- 匿名セッション発行
-- 位置点の検証とキャンパス範囲判定
+- 写真用MemorySessionとリアルタイム用LivePresenceSession、短期ExperienceLinkの発行
+- 最新位置1件の検証とキャンパス範囲判定。通常GPSの生座標・履歴は永続化しない
 - GPSジャンプの検出、表示用データの平滑化
 - PhotoMomentの発行、写真保存状態、非公開画像アクセスの管理
 - キャンパス経路グラフへのmap matchingと写真間経路の再構成
 - RouteSegmentの信頼度判定と表示用座標列の生成
-- 軌跡の保存と削除
+- 写真アンカー間の再構成経路の保存と削除
+- 写真撮影地点の量子化ピン、3件以上のフォトスポット、TTL・削除減算
+- 任意のWeb Push購読と到着・停止・解除・期限時の削除
+- 座標変換・CampusGraph・3D Mapの互換版管理
 - 描画クライアントへのリアルタイム配信
 - 到着イベントと軌跡再生データの生成
 - ヘルスチェックと運営用状態API
@@ -60,7 +63,7 @@ Unity または TouchDesigner
 - Backendも画像形式、寸法、容量を再検証し、信頼できないメタデータを破棄する
 - オブジェクトストレージのbucketは非公開とし、推測困難なキーと短時間の署名付き取得を使う
 - DBにはオブジェクトキー、状態、ハッシュ、寸法、削除期限を保存し、公開URLを保存しない
-- 描画イベントにはPhotoMoment IDと復元性の低い色特徴だけを含め、写真や取得URLを含めない
+- 描画イベントには短期イベントID、量子化済み座標、復元性の低い色特徴だけを含め、PhotoMoment ID、MemorySession ID、写真、取得URL、生GPSを含めない
 - 本人用写真ストーリーの取得は参加トークンで認証し、署名付きURLを短時間だけ発行する
 
 ## 描画
@@ -85,8 +88,11 @@ Unity または TouchDesigner
   "eventId": "event-id",
   "type": "position.updated",
   "occurredAt": "ISO-8601",
+  "coordinateVersion": "campus-2026-01",
+  "campusGraphVersion": "graph-2026-01",
+  "threeDMapVersion": "map-2026-01",
   "data": {
-    "sessionId": "anonymous-id",
+    "livePresenceId": "display-scoped-id",
     "x": 0,
     "z": 0,
     "uncertaintyM": 10,
@@ -101,9 +107,12 @@ Unity または TouchDesigner
   "eventId": "event-id",
   "type": "participant.arrived",
   "occurredAt": "ISO-8601",
+  "coordinateVersion": "campus-2026-01",
+  "campusGraphVersion": "graph-2026-01",
+  "threeDMapVersion": "map-2026-01",
   "data": {
     "arrivalId": "arrival-id",
-    "sessionId": "anonymous-id"
+    "displayAlias": {"color": "cyan", "symbol": "circle"}
   }
 }
 ```
@@ -125,3 +134,6 @@ Unity または TouchDesigner
 - 建物付近と屋内の誤差
 - 学内Wi-Fiとモバイル回線の切り替え
 - 同時参加と複数到着の処理
+- 写真ピンの量子化・TTL・3件集計・削除減算
+- 到着後の追加同意とon_siteのエリア・操作時表示
+- 座標・Graph・3D Mapの版同期とロールバック
