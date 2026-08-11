@@ -5,8 +5,8 @@
 - 個人名、学籍番号、メールアドレス、端末固有IDを保存しない
 - 参加者はランダムな匿名セッションIDで識別する
 - 生の位置点は承認済みの`delete_after`まで保持し、暫定上限は到着・停止後24時間とする
-- 軌跡は位置点から生成し、MVPでは独立テーブルとして重複保存しない
-- セッション削除時に関連する位置点と到着イベントを削除する
+- 生GPS点列を軌跡として重複保存せず、写真間の表示用再構成経路だけをRouteSegmentへ保存する
+- セッション削除時に位置点、写真、派生特徴、再構成経路、到着イベントを削除する
 - 追跡状態と到着演出状態を分離し、一つの状態値に混在させない
 - セッションの追跡失効時刻と、保存データの削除時刻を分離する
 
@@ -16,6 +16,10 @@
 erDiagram
     PARTICIPANT_SESSION ||--o{ POSITION_POINT : records
     PARTICIPANT_SESSION ||--o| ARRIVAL_EVENT : reaches
+    PARTICIPANT_SESSION ||--o{ PHOTO_MOMENT : captures
+    PARTICIPANT_SESSION ||--o{ ROUTE_SEGMENT : reconstructs
+    PHOTO_MOMENT ||--|| PHOTO_ASSET : owns
+    CAMPUS_NODE ||--o{ CAMPUS_EDGE : connects
 
     PARTICIPANT_SESSION {
         string id PK
@@ -56,6 +60,69 @@ erDiagram
         datetime arrived_at
         datetime replay_started_at
         datetime replay_finished_at
+    }
+
+    PHOTO_MOMENT {
+        string id PK
+        string session_id FK
+        string photo_asset_id FK
+        integer sequence_no
+        float latitude
+        float longitude
+        float accuracy_m
+        string location_source
+        string snapped_edge_id
+        float local_x
+        float local_z
+        datetime captured_at
+        datetime created_at
+    }
+
+    PHOTO_ASSET {
+        string id PK
+        string object_key
+        string content_hash
+        string mime_type
+        integer width
+        integer height
+        integer size_bytes
+        string status
+        string visual_features
+        datetime delete_after
+        datetime created_at
+    }
+
+    ROUTE_SEGMENT {
+        string id PK
+        string session_id FK
+        string from_photo_id FK
+        string to_anchor_type
+        string to_anchor_id
+        string graph_version
+        string confidence
+        string path_local_points
+        float length_m
+        datetime started_at
+        datetime ended_at
+    }
+
+    CAMPUS_NODE {
+        string id PK
+        string graph_version
+        string node_type
+        float local_x
+        float local_z
+    }
+
+    CAMPUS_EDGE {
+        string id PK
+        string graph_version
+        string from_node_id FK
+        string to_node_id FK
+        string path_points
+        float length_m
+        string attributes
+        boolean enabled
     }
 
     DISPLAY_CLIENT {
@@ -139,6 +206,40 @@ erDiagram
 
 到着の受付とParticipantSessionの追跡停止は同じトランザクションで行う。再生状態はArrivalEventだけを正とし、ParticipantSessionへ`arrived`や`replaying`を重複保存しない。
 
+## PhotoMoment・PhotoAsset
+
+`PhotoMoment`は参加者が残した撮影イベント、`PhotoAsset`は非公開オブジェクトストレージ上の加工済み画像を表す。写真EXIFは保存せず、撮影時位置はブラウザの位置APIから別項目として受け取る。
+
+| 項目 | 内容 |
+|---|---|
+| `sequence_no` | セッション内の撮影順。unique |
+| `location_source` | `captured_gps`、`interpolated`、`unknown` |
+| `snapped_edge_id` | map matchingで採用したCampusEdge。未確定ならnull |
+| `object_key` | 推測困難な非公開オブジェクトキー。URLではない |
+| `content_hash` | アップロード重複・破損検出用。公開しない |
+| `status` | `pending`、`ready`、`failed`、`deleting` |
+| `visual_features` | 公開表現に使う復元性の低い主要色等。画像内容の人物・物体分類は行わない |
+| `delete_after` | セッション削除期限以下。独立して延長しない |
+
+写真は1セッション12枚までを暫定上限とする。原画像をそのまま保存せず、向き補正、EXIF除去、長辺1920px以下への縮小、再エンコード後の画像だけを保存する。写真単位削除では、PhotoMoment、PhotoAsset、派生特徴を削除し、前後のRouteSegmentを再生成または未確定にする。
+
+## RouteSegment
+
+前の写真から次の写真、または最後の写真から到着点までの再構成経路。
+
+- `from_photo_id`: 区間開始のPhotoMoment
+- `to_anchor_type`: `photo`または`arrival`
+- `to_anchor_id`: 次のPhotoMomentまたはArrivalEvent
+- `graph_version`: 使用したCampusGraphの版
+- `confidence`: `high`、`medium`、`low`
+- `path_local_points`: 表示用のローカル座標列。生緯度経度を含めない
+
+生成時に参照した生GPS点を重複保存しない。同じ入力と`graph_version`から再生成できるよう、経路生成アルゴリズムの版も設定またはメタデータへ記録する。
+
+## CampusNode・CampusEdge
+
+キャンパス内の歩行可能経路を表すバージョン付きグラフ。CampusEdgeは距離、屋内外、階段、スロープ、エレベーター、利用時間、通行止め、バリアフリー可否を属性として持つ。公開中のグラフを直接上書きせず、新しい版を検証してから切り替える。
+
 ## インデックス
 
 - `position_points(session_id, recorded_at)`
@@ -146,6 +247,12 @@ erDiagram
 - `participant_sessions(tracking_status, expires_at)`
 - `participant_sessions(delete_after)`
 - `arrival_events(replay_status, arrived_at)`
+- `photo_moments(session_id, sequence_no)` unique
+- `photo_moments(photo_asset_id)` unique
+- `photo_assets(delete_after, status)`
+- `route_segments(session_id, started_at)`
+- `campus_nodes(graph_version)`
+- `campus_edges(graph_version, enabled)`
 - `display_clients(last_seen_at)`
 - `idempotency_records(scope, key_hash)` unique
 - `idempotency_records(expires_at)`
@@ -155,8 +262,10 @@ erDiagram
 
 1. `expires_at`を過ぎたセッションは追跡を`expired`にし、トークンを無効化する
 2. `delete_after`を過ぎたセッションを定期ジョブが抽出する
-3. 位置点、到着イベント、セッション、トークンハッシュをトランザクション内で削除する
-4. 参加者による即時削除も同じ削除処理を使用する
-5. 個人を復元できない集計値だけを残す場合は、大学への説明と同意文へ明記する
+3. DB上の位置点、写真イベント、写真資産参照、経路、到着イベント、セッション、トークンハッシュを削除対象として確定する
+4. 非公開オブジェクトストレージ上の写真を削除し、成功を確認する
+5. DBレコードをトランザクション内で削除する。オブジェクト削除失敗時は`deleting`として再試行し、期限超過をアラートする
+6. 参加者による即時削除も同じ削除処理を使用する
+7. 個人を復元できない集計値だけを残す場合は、大学への説明と同意文へ明記する
 
 インフラのセキュリティログとバックアップはDB削除と同時に個別レコードを消せない場合があるため、原則として生位置を含めず、別途定めた短い保持期限で世代ごと削除する。

@@ -23,6 +23,8 @@
 | 位置送信 | 1セッションあたり12回/分、burst 5回 |
 | 位置バッチ | 50点、JSON 64KB |
 | 状態・到着・停止・削除 | 1セッションあたり30回/分 |
+| 写真メタデータ作成 | 1セッション12件、1分6回、JSON 16KB |
+| 写真アップロード | 1枚5MB、許可形式JPEG/WebP、長辺1920px以下 |
 | 描画WebSocket受信 | 1接続あたり10メッセージ/秒、各256KB |
 | 運営API | 1操作者あたり60回/分 |
 
@@ -48,6 +50,13 @@
   },
   "positionIntervalSeconds": 5,
   "rawPositionRetentionHours": 24,
+  "photo": {
+    "enabled": true,
+    "maxCount": 12,
+    "maxUploadBytes": 5242880,
+    "maxLongEdgePixels": 1920,
+    "publicDisplay": false
+  },
   "contact": "approved contact"
 }
 ```
@@ -171,7 +180,99 @@ Header: `Idempotency-Key: random-value`
 
 Header: `Idempotency-Key: random-value`
 
-参加トークンで認証し、セッション、位置点、到着イベント、参加トークンハッシュをトランザクション内で削除する。成功時は`204 No Content`を返す。同じ`Idempotency-Key`による再送だけは、位置やセッション内容を持たない24時間以内の削除済み記録から同じ`204`を返す。それ以外の状態取得や送信は拒否する。インフラのセキュリティログとバックアップの削除期限は[プライバシー設計](privacy.md)に従う。
+参加トークンで認証し、セッション、位置点、写真、派生特徴、再構成経路、到着イベント、参加トークンハッシュを削除する。非公開オブジェクトストレージ上の写真削除を確認してから`204 No Content`を返す。同じ`Idempotency-Key`による再送だけは、位置やセッション内容を持たない24時間以内の削除済み記録から同じ`204`を返す。それ以外の状態取得や送信は拒否する。インフラのセキュリティログとバックアップの削除期限は[プライバシー設計](privacy.md)に従う。
+
+## 写真撮影・保存
+
+ブラウザで向き補正、EXIF除去、縮小、再エンコードを行った後、非公開オブジェクトストレージへアップロードする。Backendは申告値だけを信用せず、保存後に形式、寸法、容量、EXIF不在、ハッシュを検証して`ready`へ変更する。
+
+### `GET /v1/sessions/{sessionId}/photos`
+
+再読込・再接続時にPhotoMomentのID、撮影順、`pending`、`ready`、`failed`状態を返す。画像URLは返さない。期限切れの`pending`には新しいアップロードURLを要求できるが、端末内に対応する加工済み写真がない場合は再アップロード不能として削除を案内する。
+
+### `POST /v1/sessions/{sessionId}/photos`
+
+Header: `Idempotency-Key: random-value`
+
+```json
+{
+  "clientPhotoId": "client-generated-id",
+  "capturedAt": "2026-07-13T12:05:00Z",
+  "location": {
+    "latitude": 35.000001,
+    "longitude": 135.000001,
+    "accuracyM": 18.2,
+    "recordedAt": "2026-07-13T12:04:59Z"
+  },
+  "mimeType": "image/jpeg",
+  "sizeBytes": 820000,
+  "width": 1440,
+  "height": 1920,
+  "sha256": "hex-encoded-hash"
+}
+```
+
+`location`は取得不能なら省略できる。成功時に短時間の一回限りアップロードURLを返す。
+
+```json
+{
+  "photoMomentId": "photo-moment-id",
+  "status": "pending",
+  "uploadUrl": "short-lived-private-upload-url",
+  "uploadExpiresAt": "2026-07-13T12:10:00Z"
+}
+```
+
+クライアントは指定された`Content-Type`と申告したサイズの画像だけを`PUT uploadUrl`で送る。アップロードURLは対象オブジェクトへの書き込みだけを許可し、読み取り、上書き、一覧取得を許可しない。
+
+### `POST /v1/sessions/{sessionId}/photos/{photoMomentId}/upload-url`
+
+`pending`かつ有効なPhotoMomentに対してだけ、新しい短期アップロードURLを発行する。発行回数を制限し、`ready`、`failed`、`deleting`には発行しない。
+
+### `POST /v1/sessions/{sessionId}/photos/{photoMomentId}/complete`
+
+アップロード完了を通知する。Backendはオブジェクトを検証し、成功時は`ready`、不正形式やEXIF残存時は削除して`failed`にする。同じ`clientPhotoId`、ハッシュ、冪等性キーの再送は同じPhotoMomentを返す。
+
+### `DELETE /v1/sessions/{sessionId}/photos/{photoMomentId}`
+
+Header: `Idempotency-Key: random-value`
+
+写真オブジェクト、PhotoMoment、派生特徴を削除する。前後のRouteSegmentは残った写真とGPSから再生成し、再生成できない場合は未確定区間にする。削除確認後に`204 No Content`を返す。
+
+## 写真ストーリー
+
+### `GET /v1/sessions/{sessionId}/memory`
+
+本人用の写真、写真間の再構成経路、信頼度を時系列に返す。画像取得URLは参加認証後に発行する5分以内の署名付きURLとし、レスポンス・プロキシ・CDNログに参加トークンを含めない。
+
+```json
+{
+  "status": "ready",
+  "moments": [
+    {
+      "photoMomentId": "photo-moment-id",
+      "capturedAt": "2026-07-13T12:05:00Z",
+      "imageUrl": "short-lived-private-view-url",
+      "locationConfidence": "high"
+    }
+  ],
+  "segments": [
+    {
+      "routeSegmentId": "route-segment-id",
+      "fromPhotoMomentId": "photo-1",
+      "toPhotoMomentId": "photo-2",
+      "confidence": "medium",
+      "path": [
+        {"t": 0, "x": 2.1, "z": 3.4},
+        {"t": 1, "x": 2.8, "z": 4.0}
+      ]
+    }
+  ],
+  "deleteAfter": "2026-07-14T12:20:00Z"
+}
+```
+
+公開スクリーンや描画機はこのAPIを使用できない。本人端末への保存は画像を明示操作でダウンロードし、サーバーの`deleteAfter`を延長しない。
 
 ## 状態取得
 
@@ -186,6 +287,7 @@ Header: `Idempotency-Key: random-value`
   "replayStatus": "queued",
   "stopReason": "arrival",
   "displayAlias": {"color": "cyan", "symbol": "circle"},
+  "photoSummary": {"ready": 4, "pending": 1, "failed": 0, "maxCount": 12},
   "queuePosition": 1,
   "estimatedWaitSeconds": 15,
   "expiresAt": "2026-07-13T18:00:00Z",
@@ -264,6 +366,16 @@ Header: `Idempotency-Key: random-value`
       {"t": 0, "x": 2.1, "z": 3.4},
       {"t": 1, "x": 2.8, "z": 4.0}
     ],
+    "photoMoments": [
+      {
+        "photoMomentId": "photo-moment-id",
+        "t": 0.4,
+        "x": 2.5,
+        "z": 3.8,
+        "confidence": "medium",
+        "abstractColor": "#72D6E8"
+      }
+    ],
     "replayDurationSeconds": 15
   }
 }
@@ -273,6 +385,8 @@ Header: `Idempotency-Key: random-value`
 
 - `tracking.stopped`
 - `arrival.replay.requested`
+- `photo.moment.created`: ID、抽象色、ローカル座標、信頼度だけを含む
+- `photo.moment.deleted`
 - `system.fallback.changed`
 
 ### 描画機からサーバーへのメッセージ
@@ -295,7 +409,7 @@ WebSocketのping/pongまたはアプリheartbeatを10秒間隔で送り、30秒�
 - サーバーは `(session_id, client_point_id)` の重複を無視する
 - スナップショットには生成時点の`eventId`または連番を含め、それ以前の差分を二重適用しない
 
-参加トークンはURLや永続的な`localStorage`へ置かず、同じタブの再読込に必要な範囲で`sessionStorage`へ保存する。未送信位置点はIndexedDB等へ上限付きで保存し、送信・停止・削除・失効時に消去する。複数タブはBroadcastChannel等で既存セッションを検知し、二重の位置監視を開始しない。
+参加トークンはURLや永続的な`localStorage`へ置かず、同じタブの再読込に必要な範囲で`sessionStorage`へ保存する。未送信位置点と加工済み写真はIndexedDB等へ上限付きで保存し、送信成功、写真削除、セッション削除、失効時に消去する。写真は12枚・合計30MBを超えて端末へ保持しない。複数タブはBroadcastChannel等で既存セッションを検知し、二重の位置監視や写真送信を開始しない。
 
 ## HTTPステータス方針
 
