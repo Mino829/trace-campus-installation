@@ -10,8 +10,9 @@
 - Backend: Go
 - Realtime: WebSocket
 - Rendering: Unity または TouchDesigner
-- Storage: SQLite（MVP）、PostgreSQL（拡張時）
-- Photo Storage: 非公開オブジェクトストレージ
+- Deployment: Vercel + Google Cloud東京を第一候補、AWS東京を代替
+- Storage: マネージドPostgreSQL（Cloud SQLまたはRDS）
+- Photo Storage: 非公開オブジェクトストレージ（Cloud StorageまたはS3）
 - Route Reconstruction: バージョン付きキャンパス経路グラフ / A*またはDijkstra
 - Arrival: QRコード、将来的にNFC
 
@@ -25,6 +26,7 @@
 - [参加者ジャーニー・画面要件](docs/user-journey.md)
 - [写真メモリー・経路再構成仕様](docs/photo-memory.md)
 - [システム構成](docs/architecture.md)
+- [インフラ・データベース方針](docs/infrastructure-database-decision.md)
 - [データモデル](docs/data-model.md)
 - [API・WebSocket仕様](docs/api.md)
 - [参加追跡・到着演出の状態遷移](docs/state-machine.md)
