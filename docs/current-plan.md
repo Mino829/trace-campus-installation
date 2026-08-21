@@ -1,6 +1,6 @@
 # TRACE 現在計画
 
-- 更新日: 2026-08-11
+- 更新日: 2026-08-21
 - 状態: 企画・技術検証中
 - 用途: 会議共有用スナップショット
 
@@ -261,8 +261,10 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 | Web App | React / Next.js |
 | Backend | Go |
 | Realtime | 入口から終了までの展示Bと描画機でWebSocket |
-| DB | SQLite、拡張時PostgreSQL |
-| 写真 | 非公開オブジェクトストレージ |
+| Deployment | Vercel + Google Cloud東京を第一候補、AWS東京を代替 |
+| DB | MVPからマネージドPostgreSQL。Cloud SQLまたはRDS |
+| 写真 | 非公開Cloud StorageまたはS3。DBにはobject keyだけを保存 |
+| 最新表示位置 | 単一BackendではGoメモリ、複数Backend化時はRedis互換TTLストア |
 | 経路探索 | バージョン付きCampusGraph、A*またはDijkstra |
 | 描画 | UnityまたはTouchDesigner |
 | 到着 | 署名・期限付きQR、将来NFC |
@@ -372,7 +374,9 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 ### 技術・運用
 
 - UnityまたはTouchDesigner
-- 本番サーバー、DB、オブジェクトストレージの提供者
+- Google CloudまたはAWSの最終選択と大学承認
+- PostgreSQLのversion、可用性構成、instance size、接続上限
+- Backendを複数インスタンス化する負荷・障害要件の閾値
 - CampusGraphの作成・更新担当者
 - 対応OS・ブラウザ
 - 写真・位置データの正式な保存期間

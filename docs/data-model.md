@@ -2,6 +2,9 @@
 
 ## 方針
 
+- 本番の正本DBはMVPからマネージドPostgreSQLとする。Google CloudではCloud SQL、AWSではRDSを使用し、標準PostgreSQLの範囲を基本として移植性を保つ
+- 写真バイト列はPostgreSQLへ入れず、非公開オブジェクトストレージへ保存する
+- ER図は論理モデルを表す。`LIVE_POSITION`は永続テーブルではなく、単一BackendではGoメモリ、複数BackendではRedis互換TTLストアに置く
 - 個人名、学籍番号、メールアドレス、端末固有IDを保存しない
 - 写真用MemorySessionとリアルタイム用LivePresenceSessionを別ID・別トークン・別同意版で管理する
 - 両体験を同じ端末で使う場合だけ、短期のExperienceLinkで色・記号と到着処理を連携する
@@ -11,6 +14,8 @@
 - セッションの追跡失効時刻と、保存データの削除時刻を分離する
 
 ## ER図
+
+図中の`string id`は論理識別子の表記である。セッション、写真、経路等の実装ではPostgreSQLの`uuid`型を使用し、CampusGraphの版付きnode / edge等、人が管理する識別子だけ`text`を使用できる。
 
 ```mermaid
 erDiagram
@@ -200,6 +205,18 @@ erDiagram
 
 `OPERATOR_AUDIT_LOG`は受付停止、再生、skip、fallbackなどの運営操作を記録する。生位置、参加トークン、完全な軌跡を含めず、対象IDも運営上必要な短縮表現にする。
 
+## PostgreSQL実装規約
+
+- セッション、写真、経路等のdomain entityの主キーはPostgreSQLの`uuid`型とし、Goで生成するUUIDv7を基本とする。DB extensionへ依存せず、推測困難性とindexの時系列局所性を両立する
+- 外部へ公開しない追加の連番が必要な監査・集計テーブルだけ、`bigint generated always as identity`を使用できる
+- すべての時刻列は`timestamp with time zone`としてUTCで保存する
+- 状態値は`text`と`check`制約を基本とし、アプリだけでなくDBでも未知の状態を拒否する
+- 外部キー列には参照・削除で使用するインデックスを作る。PostgreSQLは外部キー列のインデックスを自動作成しないため、migration reviewで漏れを検査する
+- Goは上限付き接続プールを共有し、リクエストごとにDB接続を作らない
+- migrationはGitで連番管理し、後方互換のあるexpand-contract方式で適用する。production起動時に破壊的migrationを自動実行しない
+- 期限削除や写真処理を複数workerで実行する場合は、短いトランザクションと`FOR UPDATE SKIP LOCKED`でjobを取得する。オブジェクトストレージのAPI呼び出し中にDB lockを保持しない
+- 日付partition、read replica、provider固有extensionはMVPで先行導入せず、実測した件数、query、VACUUM、復旧要件に基づいて判断する
+
 ## MemorySession
 
 写真、写真撮影時GPS、経路、到着演出、本人用ストーリーを管理する。LivePresenceSessionとは別の同意版、トークン、削除期限を持つ。
@@ -219,7 +236,7 @@ erDiagram
 
 ## LivePosition
 
-LivePresenceSessionごとに最大1件の最新表示位置を持つ。受信した生緯度経度はgeofence・異常値検証と座標変換後に破棄する。
+LivePresenceSessionごとに最大1件の最新表示位置を持つ論理エンティティ。受信した生緯度経度はgeofence・異常値検証と座標変換後に破棄する。MVPではGoメモリへ保持し、プロセス再起動時は消失してよい。参加端末が次の最新位置を送信した時点で表示を再開する。複数Backend化するときだけRedis互換ストアへ移し、PostgreSQLへ位置履歴を作らない。
 
 | 項目 | 型 | 内容 |
 |---|---|---|
@@ -296,7 +313,6 @@ MemorySessionに紐づく任意参加の撮影リマインダー。ブラウザ�
 - `experience_links(memory_session_id)` unique
 - `experience_links(live_presence_session_id)` unique
 - `experience_links(expires_at)`
-- `live_positions(expires_at)`
 - `arrival_events(replay_status, arrived_at)`
 - `photo_moments(memory_session_id, sequence_no)` unique
 - `photo_moments(photo_asset_id)` unique
@@ -311,6 +327,16 @@ MemorySessionに紐づく任意参加の撮影リマインダー。ブラウザ�
 - `idempotency_records(scope, key_hash)` unique
 - `idempotency_records(expires_at)`
 - `operator_audit_logs(created_at)`
+
+実装時は、期限・queue走査のqueryに合わせて次の部分インデックスを優先する。
+
+- `photo_assets(delete_after) where status in ('pending', 'deleting')`
+- `arrival_events(arrived_at) where replay_status = 'queued'`
+- `push_subscriptions(next_send_at) where status = 'active'`
+- `memory_sessions(delete_after) where delete_after is not null`
+- `live_presence_sessions(expires_at) where tracking_status = 'tracking'`
+
+同じ列へfull indexとpartial indexを重複して作らず、`EXPLAIN`と実測で採用する索引を決める。
 
 ## 削除
 
