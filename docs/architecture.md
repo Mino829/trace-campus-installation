@@ -8,10 +8,14 @@
           |
           | HTTPS
           v
-公開HTTPS環境
+Vercel
   Next.js Web App
-  Go Backend
-  単一の正本DB
+          |
+          | HTTPS / WSS
+          v
+承認済みクラウドの東京リージョン
+  Go Backendコンテナ
+  マネージドPostgreSQL
   非公開オブジェクトストレージ
           |
           | WSS（描画機から外向き接続）
@@ -23,7 +27,23 @@ Unity または TouchDesigner
 プロジェクター / 音響 / 照明
 ```
 
-本番のGo Backend、DB、非公開オブジェクトストレージは公開HTTPS環境に置き、参加者端末と描画機の双方から外向き接続する。会場PC上のGo Backendは開発または公開環境が使用不能な場合の緊急構成とし、同時に二つの正本DBを動かさない。写真原画像や画像URLは描画機へ送らない。
+本番はNext.jsをVercelへ配置し、Go Backend、DB、非公開オブジェクトストレージを承認済みクラウドの東京リージョンへ置く。第一候補はGoogle CloudのCloud Run、Cloud SQL for PostgreSQL、Cloud Storageとし、大学の既存契約・審査がAWSを優先する場合はAWS東京のコンテナ実行環境、RDS for PostgreSQL、S3へ切り替える。GoはOCI互換コンテナ、DBは標準PostgreSQLを基本として移植性を保つ。
+
+参加者端末と描画機はGo Backendへ外向き接続する。会場PC上のGo Backendは開発または公開環境が使用不能な場合の緊急構成とし、本番正本へ同時書き込みしない。写真原画像や画像URLは描画機へ送らない。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
+
+## データ配置
+
+| データ | 保存先 | 方針 |
+|---|---|---|
+| セッション、同意、写真メタデータ、到着、再構成経路 | PostgreSQL | 本番の単一正本。期限削除とバックアップ保持を管理する |
+| 加工済み写真 | 非公開Cloud StorageまたはS3 | DBにはobject keyだけを保存し、短時間の署名付きアクセスを使う |
+| 通常GPSの生座標 | 保存しない | リクエスト処理中に検証・変換後、破棄する |
+| 量子化済み最新表示位置 | Goメモリ、拡張時はRedis互換TTLストア | 30〜60秒TTL。PostgreSQLの位置履歴にしない |
+| 合成データ | local / stagingと会場PC | 本番参加者データから作らない |
+
+## 拡張境界
+
+MVPではGo Backendを単一の主インスタンスとして開始し、50同時追跡・60セッション相当を検証する。複数Backendへ拡張するときは、最新表示位置、WebSocket fan-out、主描画機leaseをRedis互換ストアまたはメッセージ基盤へ分離する。PostgreSQLは正本のまま維持し、接続プール、Backend最大インスタンス数、DB接続上限を一つの容量計画として管理する。
 
 ## Web App
 

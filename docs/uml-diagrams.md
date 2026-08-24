@@ -86,7 +86,7 @@ flowchart LR
 
 ## 配置図
 
-本番のWeb App、Go Backend、正本DBは公開HTTPS環境へ配置します。会場PC上のBackendは開発・承認済み緊急構成に限定し、本番DBと同時に正本として動かしません。
+本番のWeb AppはVercel、Go Backend、正本DB、非公開写真bucketは承認済みクラウドの東京リージョンへ配置します。第一候補はGoogle Cloud、大学の既存契約・審査が優先される場合はAWSを代替とします。会場PC上のBackendは開発・承認済み緊急構成に限定し、本番DBと同時に正本として動かしません。
 
 ```mermaid
 flowchart TB
@@ -96,12 +96,17 @@ flowchart TB
         MobileBrowser --- MobileStorage
     end
 
-    subgraph PublicEnvironment["公開HTTPS環境"]
+    subgraph Vercel["Vercel"]
         NextServer["Next.js<br/>参加画面の配信"]
+    end
+
+    subgraph PublicEnvironment["Google Cloud東京（第一候補）またはAWS東京"]
         GoBackend["Go Backend<br/>REST API・WebSocket"]
-        MainDB[("単一の正本DB<br/>SQLiteまたはPostgreSQL")]
+        MainDB[("正本DB<br/>マネージドPostgreSQL")]
+        PhotoStore[("非公開写真bucket<br/>Cloud StorageまたはS3")]
         NextServer --- GoBackend
         GoBackend --- MainDB
+        GoBackend --- PhotoStore
     end
 
     subgraph Venue["展示会場"]
@@ -139,8 +144,9 @@ flowchart TB
 
 - スマートフォンと描画PCは、どちらも公開環境へ外向きに接続する
 - 学内ネットワークから描画PCへの受信ポート開放を前提としない
-- SQLiteは単一Backendと永続ディスクを使用できる場合のMVP候補とする
-- 複数Backendや一時ディスク、無停止切替が必要ならPostgreSQLを使用する
+- MVPからマネージドPostgreSQLを正本とし、Google CloudではCloud SQL、AWSではRDSを使用する
+- 通常GPSの最新表示位置はPostgreSQLへ履歴保存せず、単一BackendではGoメモリ、複数BackendではRedis互換TTLストアへ置く
+- Go BackendはOCI互換コンテナとしてGCP / AWS間の移植性を保つ
 - 主描画PC停止時はバックアップ描画または合成映像へ切り替える
 
 ## コンポーネント図
@@ -235,7 +241,7 @@ sequenceDiagram
     autonumber
     actor User as 参加者
     participant Browser as スマートフォン<br/>Next.js Web App
-    participant Front as 公開HTTPS環境<br/>Next.js
+    participant Front as Vercel<br/>Next.js
     participant API as Go Backend
     participant DB as 正本DB
     participant Renderer as 描画PC<br/>Unity / TouchDesigner
@@ -432,8 +438,8 @@ sequenceDiagram
 | 描画へ渡す誤差情報 | 図では「不確実性」と表記している | `accuracyM`と`uncertaintyM`のどちらを正式名称にするか、生の精度か加工後の値か |
 | 到着後のリアルタイム位置 | `arrived`で停止か追加同意による`on_site`を選ぶ | on_siteの点・エリア・操作時表示の採用基準 |
 | 代替参加の処理 | ユースケースだけに記載し、端末間フローには含めていない | QRチェックポイントのAPI、合成軌跡の生成主体、到着キューへ入れる条件 |
-| フロントエンドの配置 | Next.jsとGo Backendを同じ「公開HTTPS環境」に置く | 同一ホスト、別サービス、リバースプロキシ構成のどれにするか |
-| 正本DB | 条件に応じてSQLiteまたはPostgreSQLと表記している | 本番で使用するDB、永続ディスク、バックアップ、復旧方法 |
+| クラウド提供者 | Vercel + Google Cloud東京を第一候補、AWS東京を代替とする | 大学の既存契約、保存地域、個人情報審査に基づく最終承認 |
+| PostgreSQL構成 | MVPからCloud SQLまたはRDSのマネージドPostgreSQLを正本とする | version、可用性、instance size、接続上限、バックアップ保持期間 |
 | 描画ソフト | UnityまたはTouchDesignerと併記している | 最終的に使用するソフトと、WebSocketイベントを受け取る実装担当 |
 | Raspberry Pi・音響・照明 | 候補または任意接続として点線で表している | MVPに含める範囲、接続方式、障害時に切り離せる条件 |
 

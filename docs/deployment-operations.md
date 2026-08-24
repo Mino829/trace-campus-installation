@@ -3,11 +3,16 @@
 ## 推奨配置
 
 ```text
-公開HTTPS環境
+Vercel
   Next.js Web App
-  Go Backend
-  正本DB: SQLiteまたはPostgreSQL
-  非公開オブジェクトストレージ
+          |
+          | HTTPS / WSS
+          v
+承認済みクラウドの東京リージョン（いずれか一方）
+  第一候補: Google Cloud
+    Cloud Run / Cloud SQL PostgreSQL / Cloud Storage / Monitoring
+  代替: AWS
+    Go container実行環境 / RDS PostgreSQL / S3 / CloudWatch
           |
           | outbound WebSocket
           v
@@ -29,7 +34,19 @@ Raspberry Pi 4B
 
 学内ネットワークから描画PCへの受信ポート開放を要求せず、描画PC側から公開サーバーへ接続する。
 
-本番では公開HTTPS環境のDBだけを正本とし、写真は非公開オブジェクトストレージへ保存する。SQLiteは単一Backendインスタンスと永続ディスクを前提とし、複数Backend、マネージド環境の一時ディスク、無停止フェイルオーバーが必要な場合はPostgreSQLを使用する。会場PC上のGo Backendは開発・緊急構成に限り、本番正本と同時書き込みしない。
+本番では承認済みクラウド環境のマネージドPostgreSQLだけを正本とし、写真は同じ承認済み地域の非公開オブジェクトストレージへ保存する。MVPからSQLiteを本番正本にせず、Google CloudではCloud SQL for PostgreSQL、AWSではRDS for PostgreSQLを使用する。Goは両環境へ配置できるOCI互換コンテナとし、提供者固有機能への依存を抑える。会場PC上のGo Backendは開発・緊急構成に限り、本番正本と同時書き込みしない。
+
+通常GPSの最新表示位置はPostgreSQLへ履歴保存しない。単一BackendではGoメモリへ30〜60秒TTLで保持し、複数Backend化するときにRedis互換の共有TTLストアへ移す。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
+
+## 環境・リリース管理
+
+- `local`、`staging`、`production`を分離し、本番参加者データを他環境へコピーしない
+- pull requestごとにVercel Previewを作り、BackendとDB migrationは先にstagingで検証する
+- productionは`main`へのpushだけで自動公開せず、技術責任者が承認した成果物を昇格する
+- Web、Go container、DB schema、WebSocket schema、CampusGraph、座標変換、3D Mapの版をrelease manifestへまとめる
+- DB migrationは後方互換のあるexpand-contract方式とし、production起動時に破壊的変更を自動実行しない
+- T-1週以降は緊急修正以外を停止し、直前安定版へ戻せるWeb deployment、container image、描画ビルドを保持する
+- Cloud RunまたはAWSのBackend最大インスタンス数と、Goの1インスタンス当たりDB接続上限を同時に設定する
 
 ## 機材役割
 
@@ -85,6 +102,8 @@ Raspberry Pi 4B
 - 到着キュー件数と最古待ち時間
 - APIエラー率
 - DB容量
+- DB接続数、接続上限、長時間query、lock待ち
+- DB自動バックアップ、point-in-time recovery、復旧試験の最終成功時刻
 - 描画fps
 - ネットワーク往復時間
 - 位置受信から描画までのp95遅延
@@ -105,6 +124,7 @@ Raspberry Pi 4B
 - 到着キューの最古待ちが30秒超過、または10件超過
 - 5分窓のAPIサーバーエラー率が1%超過
 - DB・ディスク使用率が80%超過
+- DB接続使用率が承認済み上限の80%超過
 - 削除ジョブが予定時刻から1時間以上未成功
 - `pending`写真が15分以上、`deleting`写真が1時間以上残存
 - 写真保存エラー率が5分窓で1%超過

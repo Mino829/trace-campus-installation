@@ -10,6 +10,7 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 - 通信契約: [API・WebSocket仕様](api.md)
 - 状態の正本: [参加追跡・到着演出の状態遷移](state-machine.md)
 - データ保持・削除: [プライバシー設計](privacy.md)と[データモデル](data-model.md)
+- 配置・DBの技術方針: [インフラ・データベース方針](infrastructure-database-decision.md)
 - 公開可否: [試験計画・公開判定基準](test-plan.md)
 
 矛盾が見つかった場合はこの優先関係に従って修正し、未決事項を暗黙に実装へ持ち込まない。
@@ -30,6 +31,7 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 ## システム
 
 - [システム構成](architecture.md): コンポーネントと責務
+- [インフラ・データベース方針](infrastructure-database-decision.md): Vercel、Google Cloud / AWS、PostgreSQL、環境分離、拡張方針
 - [データモデル](data-model.md): 保存データ、関係、削除方針
 - [API・WebSocket仕様](api.md): Webアプリ、Go、描画クライアント間の契約
 - [参加追跡・到着演出の状態遷移](state-machine.md): 写真、リアルタイム位置、会場内フェーズ、到着演出を分離した状態管理
@@ -46,11 +48,13 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 - Web AppはReact / Next.jsを使用する
 - BackendはGoを使用する
 - 描画はUnityまたはTouchDesignerを比較後に決定する
-- MVPの保存先はSQLiteとし、必要になった時点でPostgreSQLを検討する
+- MVPからマネージドPostgreSQLを正本とし、Google CloudではCloud SQL、AWSではRDSを使用する
+- Next.jsはVercel、Go BackendはGoogle Cloud東京を第一候補とし、大学の既存契約・審査によりAWS東京へ切り替えられるコンテナ構成にする
+- 写真本体はDBへ保存せず、非公開のCloud StorageまたはS3へ保存する
 - スマートフォンはHTTPSで公開エンドポイントへ接続する
 - 描画PCは外向きWebSocket接続を使用する
 - 位置取得間隔、精度閾値、同時接続数はキャンパス実地試験で確定する
-- 本番は公開HTTPS環境にWeb App、Go Backend、単一の正本DBを置く。会場PC上のGoは開発・緊急構成に限る
+- 本番はVercelにWeb App、承認済みクラウド環境にGo Backend、PostgreSQL、非公開写真ストレージを置く。会場PC上のGoは開発・緊急構成に限る
 - 参加追跡状態と到着演出状態は別々に管理する
 - 写真を記憶の主役、GPSを写真間の経路再構成に使う補助データとする
 - 通常GPSは最新表示だけに使って履歴を保存・再送せず、写真撮影時GPSだけを写真と一緒に再送できる
@@ -66,7 +70,8 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 - データ保存期間
 - UnityまたはTouchDesignerの最終選択
 - 3Dキャンパスモデルの制作方法
-- 本番サーバー・DBの提供者と配置
+- Google CloudまたはAWSの最終選択と大学承認
+- PostgreSQLのversion、可用性構成、instance size、接続上限
 - 写真オブジェクトストレージの提供者、保存地域、削除保証
 - キャンパス経路グラフの作成・更新責任者
 - 対応OS・ブラウザの最低バージョン
