@@ -32,6 +32,7 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 
 - [システム構成](architecture.md): コンポーネントと責務
 - [インフラ・データベース方針](infrastructure-database-decision.md): Vercel、Google Cloud / AWS、PostgreSQL、環境分離、拡張方針
+- [Cloudflare Web + Google Cloud Backend 配置案](cloudflare-web-backend-option.md): 稼働中のデモを踏まえた未採用の配置比較と、Web・Go間の通信境界
 - [データモデル](data-model.md): 保存データ、関係、削除方針
 - [API・WebSocket仕様](api.md): Webアプリ、Go、描画クライアント間の契約
 - [参加追跡・到着演出の状態遷移](state-machine.md): 写真、リアルタイム位置、会場内フェーズ、到着演出を分離した状態管理
