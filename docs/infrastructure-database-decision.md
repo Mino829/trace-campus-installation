@@ -4,6 +4,8 @@
 - 状態: 技術方針として採用。提供者と保存地域は大学の情報・個人情報担当の承認後に確定
 - 対象: MVP、ステージング、本番
 
+Cloudflareで稼働中のWebデモを踏まえた[配置変更案](cloudflare-web-backend-option.md)を比較検討中。本書の採用方針は正式な変更決定まで維持する。
+
 ## 決定
 
 1. Web AppはNext.jsをVercelへ配置する
