@@ -1,7 +1,7 @@
 # インフラ・データベース方針
 
 - 決定日: 2026-08-21
-- 状態: 技術方針として採用。提供者と保存地域は大学の情報・個人情報担当の承認後に確定
+- 状態: 技術方針として採用した設計目標。現行Backendへすべて反映済みではなく、提供者と保存地域・保持期間は大学の情報・個人情報担当の承認後に確定
 - 対象: MVP、ステージング、本番
 
 Cloudflareで稼働中のWebデモを踏まえた[配置変更案](cloudflare-web-backend-option.md)を比較検討中。本書の採用方針は正式な変更決定まで維持する。
@@ -13,7 +13,7 @@ Cloudflareで稼働中のWebデモを踏まえた[配置変更案](cloudflare-we
 3. 大学の既存契約、審査、運用体制がAWSを優先する場合は、AWS東京リージョンのコンテナ実行環境へ切り替える
 4. 本番の正本DBはMVPからマネージドPostgreSQLを使用する。Google CloudではCloud SQL for PostgreSQL、AWSではAmazon RDS for PostgreSQLを対応先とする
 5. 写真バイト列はPostgreSQLへ保存せず、Google Cloud StorageまたはAmazon S3の非公開bucketへ保存する。DBにはオブジェクトキー、状態、ハッシュ、寸法、削除期限だけを保存する
-6. 通常GPSの最新表示位置は永続的なPostgreSQL履歴にしない。単一BackendのMVPではGoプロセス内にTTL付きで保持し、複数Backendへ拡張するときはRedis互換の共有TTLストアへ移す
+6. 通常GPSの量子化済み最新表示位置は単一Go Backendインスタンスのプロセスメモリに30〜60秒TTLで保持する。PostgreSQLの`live_positions`を使用せず、複数Backendへ拡張するときだけRedis互換の共有TTLストアへ移す
 7. 会場のUnity / TouchDesignerはGo Backendへ外向きWSS接続を行い、学内ネットワークから会場PCへの受信ポート開放を前提としない
 
 ## 採用理由
@@ -32,7 +32,7 @@ Cloudflareで稼働中のWebデモを踏まえた[配置変更案](cloudflare-we
 | Go API・WebSocket | Cloud Run（東京） | ECS/Fargate等のコンテナ実行環境（東京） |
 | 正本DB | Cloud SQL for PostgreSQL（東京） | RDS for PostgreSQL（東京） |
 | 写真 | Cloud Storage private bucket（東京） | S3 private bucket（東京） |
-| 一時的な共有位置・配信状態 | Memorystore等のRedis互換ストア | ElastiCache等のRedis互換ストア |
+| 複数Backend化した場合の共有位置・配信状態（MVPでは未使用） | Memorystore等のRedis互換ストア | ElastiCache等のRedis互換ストア |
 | 監視 | Cloud Monitoring / Logging | CloudWatch |
 
 AWS側の具体的なコンテナ実行環境とロードバランサーは、AWSを選択した場合に大学の標準構成へ合わせて確定する。
@@ -56,12 +56,13 @@ AWS側の具体的なコンテナ実行環境とロードバランサーは、AW
 
 ### 型・制約
 
-- セッション、写真、経路等のdomain entityの主キーはPostgreSQLの`uuid`型とし、Goで生成するUUIDv7を基本とする。DB extensionへ依存せず、推測困難性とindexの時系列局所性を両立する
+- セッション、写真、経路等のdomain entityの主キーと外部キーは既存のプレフィックス付き不透明な`text` IDを保持する。UUIDv7やPostgreSQL `uuid`型への移行は行わない
 - 外部へ公開しない追加の連番が必要な監査・集計テーブルだけ、`bigint generated always as identity`を使用できる
 - 時刻は`timestamp with time zone`としてUTCで保存する
 - 状態値は`text`と`check`制約を基本とし、不正な状態をDBでも拒否する
 - 外部キー列には参照・削除で使用するインデックスを作る
 - 参加トークン、Push endpoint、写真URL、生GPS履歴を主キーや公開識別子へ使用しない
+- `memory_sessions`と`live_presence_sessions`それぞれに`expires_at`と`delete_after`を持ち、期限が異なり得る。`expires_at`後は位置送信を停止しても、本人の状態・閲覧・削除は各`delete_after`まで受け付ける。保持期間は大学のプライバシー審査（#9）待ち
 
 ### 接続管理
 
@@ -85,14 +86,15 @@ AWS側の具体的なコンテナ実行環境とロードバランサーは、AW
 - 列追加、両版対応、データ移行、旧列削除の順で後方互換を保つexpand-contract方式を使う
 - migration適用、ready確認、アプリ公開を分け、失敗時にWebとGoを直前の互換版へ戻せるようにする
 - 大規模な制約追加やindex作成はlock時間をstagingで測り、公開時間外に実行する
+- Backendの`002_remove_live_positions.sql`は旧APIのテーブル参照と非互換の例外である。位置受付を止め、旧API・清掃ジョブを停止した上で適用し、同じschema版の新APIのみ起動する。旧バイナリへの単純なrollbackはできず、既存表示位置は破棄する。承認とstagingでの初回・差分移行検証なしに公開中のDBへ適用しない
 
 ## 拡張段階
 
 ### Stage 1: MVP
 
-- Go Backendは単一の主インスタンスを基本とする
-- PostgreSQLは単一のマネージド主系を正本とする
-- 最新表示位置はGoメモリへ30〜60秒TTLで保持し、再起動時は次の位置送信から再構成する
+- Go BackendのAPIとWebSocketは単一の稼働インスタンスに限定する。Cloud Run等の自動拡張設定も最大1インスタンスとし、別プロセスへ最新位置リクエストや描画接続を分散させない
+- PostgreSQLは単一のマネージド主系を正本とするが、最新表示位置を保存しない
+- 最新表示位置はGoメモリへ30〜60秒TTLで保持し、再起動時は次の位置送信から再構成する。既存のPostgreSQL `live_positions`はBackendの002 migrationで除去する必要がある。設計記載はmigration実施を意味しない
 - 50同時追跡、5秒間隔、60セッション相当を負荷試験する
 
 ### Stage 2: 複数Backend

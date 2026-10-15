@@ -4,18 +4,18 @@
 
 - 本番の正本DBはMVPからマネージドPostgreSQLとする。Google CloudではCloud SQL、AWSではRDSを使用し、標準PostgreSQLの範囲を基本として移植性を保つ
 - 写真バイト列はPostgreSQLへ入れず、非公開オブジェクトストレージへ保存する
-- ER図は論理モデルを表す。`LIVE_POSITION`は永続テーブルではなく、単一BackendではGoメモリ、複数BackendではRedis互換TTLストアに置く
+- ER図は論理モデルを表す。`LIVE_POSITION`は永続テーブルではなく、単一Go BackendプロセスのメモリにLivePresenceSessionごとの最新1件を30〜60秒TTLで保持する。複数Backend化するときだけRedis互換TTLストアへ移す。PostgreSQLの`live_positions`は使用しない
 - 個人名、学籍番号、メールアドレス、端末固有IDを保存しない
 - 写真用MemorySessionとリアルタイム用LivePresenceSessionを別ID・別トークン・別同意版で管理する
-- 両体験を同じ端末で使う場合だけ、短期のExperienceLinkで色・記号と到着処理を連携する
+- 両体験を同じ端末で使う場合だけ、ExperienceLinkで色・記号、到着処理、本人向け状態表示を連携する。連携トークンの有効期間は短くし、読み取りのための最小限の関連付けは削除期限まで維持する
 - 通常GPSの生緯度経度と点列は永続化せず、量子化済みの最新表示位置だけを30〜60秒保持する
 - 写真撮影時GPSはPhotoMomentのアンカーとして写真と同じ期限まで保持する
 - 追跡状態と到着演出状態を分離し、一つの状態値に混在させない
-- セッションの追跡失効時刻と、保存データの削除時刻を分離する
+- 各セッションの`expires_at`（追跡操作の期限）と`delete_after`（保存データの削除期限）を分離し、追跡失効後も本人の読み取り・自己削除を各`delete_after`まで許可する。期間は大学のプライバシー承認（#9）待ち
 
 ## ER図
 
-図中の`string id`は論理識別子の表記である。セッション、写真、経路等の実装ではPostgreSQLの`uuid`型を使用し、CampusGraphの版付きnode / edge等、人が管理する識別子だけ`text`を使用できる。
+図中の`string id`は論理識別子の表記である。セッション、写真、経路等の識別子と参照先は既存の推測困難なプレフィックス付き不透明IDを維持し、PostgreSQLでは`text`型で揃える。UUIDv7や`uuid`型への変更は行わない。`LIVE_POSITION`だけはER図内の論理エンティティであり、PostgreSQLのテーブル・外部キーではない。
 
 ```mermaid
 erDiagram
@@ -63,6 +63,7 @@ erDiagram
         string memory_session_id FK
         string live_presence_session_id FK
         string link_token_hash
+        datetime link_token_expires_at
         datetime expires_at
     }
 
@@ -185,6 +186,7 @@ erDiagram
         string key_hash PK
         string request_hash
         integer response_status
+        string deletion_result
         datetime expires_at
     }
 
@@ -201,13 +203,13 @@ erDiagram
 
 `DISPLAY_CLIENT`は参加者データと関連付けない。描画機の接続監視だけに使用する。
 
-`IDEMPOTENCY_RECORD`は到着、停止、削除、描画完了の重複適用を防ぐ。キーそのものではなくハッシュ、操作スコープ、リクエスト内容のハッシュ、返却結果、有効期限を最大24時間保存する。同じキーで異なる内容が来た場合は競合として拒否する。削除操作では位置やセッション内容を持たない削除済み記録だけを残し、同じキーの再送へ同じ結果を返す。
+`IDEMPOTENCY_RECORD`は到着、停止、削除、描画完了の重複適用を防ぐ。キーそのものではなくハッシュ、操作スコープ、リクエスト内容のハッシュ、返却結果、有効期限を最大24時間保存する。同じキーで異なる内容が来た場合は競合として拒否する。両セッション削除の途中結果は確定結果として固定せず、再送ごとに未完了側だけ進める。削除記録はID、資格情報、写真、位置やセッション内容を含めず、両側の`deleted`/`pending`と完了状態を安全に再現できる短期receiptとする。
 
 `OPERATOR_AUDIT_LOG`は受付停止、再生、skip、fallbackなどの運営操作を記録する。生位置、参加トークン、完全な軌跡を含めず、対象IDも運営上必要な短縮表現にする。
 
 ## PostgreSQL実装規約
 
-- セッション、写真、経路等のdomain entityの主キーはPostgreSQLの`uuid`型とし、Goで生成するUUIDv7を基本とする。DB extensionへ依存せず、推測困難性とindexの時系列局所性を両立する
+- セッション、写真、経路等のdomain entityの主キー・参照列は既存のプレフィックス付き不透明な`text` IDを保持する。UUIDv7への一括変更はせず、同じIDを使う外部キーの型も`text`で合わせる
 - 外部へ公開しない追加の連番が必要な監査・集計テーブルだけ、`bigint generated always as identity`を使用できる
 - すべての時刻列は`timestamp with time zone`としてUTCで保存する
 - 状態値は`text`と`check`制約を基本とし、アプリだけでなくDBでも未知の状態を拒否する
@@ -219,11 +221,11 @@ erDiagram
 
 ## MemorySession
 
-写真、写真撮影時GPS、経路、到着演出、本人用ストーリーを管理する。LivePresenceSessionとは別の同意版、トークン、削除期限を持つ。
+写真、写真撮影時GPS、経路、到着演出、本人用ストーリーを管理する。LivePresenceSessionとは別の同意版、トークン、`expires_at`、`delete_after`を持つ。`expires_at`後は新規の追跡操作を受け付けず、本人の状態・写真の閲覧と自己削除は`delete_after`まで許可する。
 
 ## LivePresenceSession
 
-通常GPSのベストエフォート表示だけを管理する。
+通常GPSのベストエフォート表示だけを管理する。`expires_at`後は新規の位置送信を拒否して最新表示位置を破棄し、自己削除はLive自身の`delete_after`まで許可する。状態の読み取りは紐づくMemorySessionの本人用GETで行い、Memoryが先に削除された後はそのGETも提供しない。
 
 - `tracking_status`: `tracking`、`stopped`、`expired`
 - `presence_phase`: `approaching`、`arrived`、`on_site`、`ended`
@@ -232,11 +234,11 @@ erDiagram
 
 ## ExperienceLink
 
-同じ端末で両展示へ参加する場合だけ作る短期レコード。色・記号と到着処理を連携するが、写真、生GPS、経路を持たない。片方の削除、到着、期限切れから24時間以内の最短時点で削除する。
+同じ端末で両展示へ参加する場合だけ作る関連付け。色・記号と到着処理を連携し、Memory用Bearer tokenで本人向けGETがLiveの状態と期限を取得するための関係を保つが、写真、生GPS、経路、Live用トークンは返さない。連携用トークンの有効期限は`link_token_expires_at`で管理して到着・失効後に無効化し、関連付けは`expires_at`（両セッションのうち早い`delete_after`以下）まで残す。片方の削除時にも関連付けを削除する。追跡用`expires_at`到達だけでは消さない。
 
 ## LivePosition
 
-LivePresenceSessionごとに最大1件の最新表示位置を持つ論理エンティティ。受信した生緯度経度はgeofence・異常値検証と座標変換後に破棄する。MVPではGoメモリへ保持し、プロセス再起動時は消失してよい。参加端末が次の最新位置を送信した時点で表示を再開する。複数Backend化するときだけRedis互換ストアへ移し、PostgreSQLへ位置履歴を作らない。
+LivePresenceSessionごとに最大1件の最新表示位置を持つ論理エンティティ。受信した生緯度経度はgeofence・異常値検証と座標変換後に破棄する。単一Go Backendインスタンスのプロセスメモリで30〜60秒TTLを設定し、プロセス再起動時は消失してよい。参加端末が次の最新位置を送信した時点で表示を再開する。複数Backend化するときだけRedis互換TTLストアへ移し、PostgreSQLに`live_positions`テーブルや位置履歴を作らない。既存の同名テーブルがある環境ではBackend側の002 migrationで除去する必要がある（本書はmigration適用済みとは主張しない）。
 
 | 項目 | 型 | 内容 |
 |---|---|---|
@@ -340,8 +342,8 @@ MemorySessionに紐づく任意参加の撮影リマインダー。ブラウザ�
 
 ## 削除
 
-1. LivePresenceSessionの`expires_at`到来時は`expired`にし、LivePosition、トークン、対応するExperienceLinkを削除する
-2. MemorySessionの`delete_after`到来時は、写真、経路、到着、PushSubscription、トークン、対応するExperienceLinkを削除対象にする
+1. LivePresenceSessionの`expires_at`到来時は`expired`にし、LivePositionを削除し、位置送信を拒否する。状態取得・自己削除用トークンとExperienceLinkの関連付けは`delete_after`まで維持する
+2. 各Sessionの`delete_after`到来時は、該当Sessionの写真・経路・到着・PushSubscription等の関連データ、トークン、対応するExperienceLinkを削除対象にする
 3. 写真が寄与したPhotoHotspotBucketを減算し、公開条件を下回ったbucketを非公開にする
 4. 非公開オブジェクトストレージ上の写真を削除し、成功を確認する
 5. DBレコードをトランザクション内で削除する。オブジェクト削除失敗時は`deleting`として再試行し、期限超過をアラートする

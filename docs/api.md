@@ -1,5 +1,7 @@
 # API・WebSocket仕様
 
+この文書はIssue #11で合意した実装目標の契約を含む設計仕様であり、全APIが現行Backendで提供済みであることを示さない。到着証明の実現方法と大学のプライバシー審査（#9）は未完了。
+
 ## 共通方針
 
 - Base path: `/v1`
@@ -35,7 +37,7 @@
 
 ## 冪等性キー
 
-到着、停止、削除、描画完了の`Idempotency-Key`は操作スコープ、キーのハッシュ、リクエスト内容のハッシュ、結果を24時間保持する。同じキーと同じ内容には以前の結果を返し、同じキーで異なる内容は`409 IDEMPOTENCY_CONFLICT`とする。
+到着、停止、削除、描画完了の`Idempotency-Key`は操作スコープ、キーのハッシュ、リクエスト内容のハッシュ、結果を24時間保持する。同じキーで異なる内容は`409 IDEMPOTENCY_CONFLICT`とする。削除以外は同じキーと内容に以前の結果を返す。両セッション削除の`pending`結果は中間状態であり、同じキーと両資格情報で再送すると未完了側を再実行し、進捗結果を更新する。完了した側は再作成しない。
 
 ## 公開設定・同意文
 
@@ -82,6 +84,8 @@
 }
 ```
 
+現行Go APIの公開設定は位置参加の同意版・会場内同意版・位置TTL・空の写真機能情報までを返す。上記の`photoMarker`と`notification`は各機能が実装された後の契約例であり、現行レスポンスには含まれない。現行の`photo.enabled`は`false`である。参加用の独立したMemory/Liveの期限は`POST /v1/experiences`と本人用GETの各セッション内で返す。未提供機能の値を固定で返して「有効」と誤認させない。
+
 ## エラー形式
 
 ```json
@@ -112,28 +116,30 @@
 
 ```json
 {
-  "experienceId": "ephemeral-experience-id",
+  "experienceId": "exp_example",
   "experienceLinkToken": "short-lived-link-secret",
   "memorySession": {
-    "sessionId": "memory-session-id",
-    "participantToken": "memory-participant-secret"
+    "sessionId": "mem_example",
+    "participantToken": "memory-participant-secret",
+    "expiresAt": "2026-07-13T18:00:00Z",
+    "deleteAfter": "2026-07-14T18:00:00Z"
   },
   "livePresenceSession": {
-    "sessionId": "live-session-id",
+    "sessionId": "live_example",
     "participantToken": "live-participant-secret",
     "trackingStatus": "tracking",
-    "presencePhase": "approaching"
+    "presencePhase": "approaching",
+    "expiresAt": "2026-07-13T18:00:00Z",
+    "deleteAfter": "2026-07-14T18:00:00Z"
   },
   "displayAlias": {"color": "cyan", "symbol": "circle"},
-  "expiresAt": "2026-07-13T18:00:00Z",
-  "deleteAfter": "2026-07-14T18:00:00Z",
   "positionIntervalSeconds": 5
 }
 ```
 
-各`participantToken`はレスポンス時だけ返し、サーバーには別々のハッシュを保存する。一方のトークンで他方の写真・位置を操作できない。`experienceLinkToken`は色・記号と到着連携だけに使う短期トークンで、写真、生GPS、経路を返さない。有効な同意文と異なる版は`409 CONSENT_VERSION_MISMATCH`として拒否する。
+`enableLivePresence: false`なら`livePresenceSession`は省略する。各`participantToken`はレスポンス時だけ返し、サーバーには別々のハッシュを保存する。一方のトークンで他方の写真・位置を操作できない。`experienceLinkToken`は色・記号と到着連携だけに使う短期トークンで、写真、生GPS、経路を返さない。有効な同意文と異なる版は`409 CONSENT_VERSION_MISMATCH`として拒否する。
 
-MemorySessionとLivePresenceSessionは別々の`expiresAt`と`deleteAfter`を持つ。「すべて削除」は両トークンが有効な端末から両セッションを削除し、片方だけの削除も提供する。
+両セッションには別々の`expiresAt`と`deleteAfter`を返す。例示日時と保持期間は大学のプライバシー審査（#9）による決定値ではない。`expiresAt`以後は新規位置送信などの追跡操作を拒否するが、本人の状態取得・閲覧と削除は各セッションの`deleteAfter`まで利用できる。`deleteAfter`到達時に保存データを期限削除する。
 
 ## 位置送信
 
@@ -162,6 +168,8 @@ MemorySessionとLivePresenceSessionは別々の`expiresAt`と`deleteAfter`を持
 
 検証後、生の緯度経度は永続化せず、量子化済みローカル座標の最新値へ置き換える。拒否理由は`OUTSIDE_GEOFENCE`、`LOW_ACCURACY`、`TOO_OLD`、`FUTURE_TIME`、`IMPOSSIBLE_JUMP`を想定する。
 
+通常GPSの最新表示位置は単一Go Backendプロセスのメモリで30〜60秒TTLとし、再起動で失われる。PostgreSQLの`live_positions`テーブルを使わない。複数インスタンス化はRedis互換TTLストアへの移行後に行う。
+
 ## 到着
 
 ### `POST /v1/memory-sessions/{memorySessionId}/arrival`
@@ -188,7 +196,7 @@ Header: `Idempotency-Key: random-value`
 }
 ```
 
-到着証明は展示場入口の画面で定期更新するQRを基本とし、`checkpointId`、会場、発行時刻、有効期限、ランダム値を署名で保護する。期限切れ、改変、別会場の証明を拒否する。MemorySessionへ到着イベントを作り、有効なExperienceLinkがある場合だけ対応するLivePresenceSessionを`arrived`へ変更する。到着時に撮影通知を停止・削除するが、通常GPSは本人が継続可否を選ぶまで自動停止しない。
+到着証明として展示場入口で定期更新する署名付きQR（`checkpointId`、会場、発行時刻、有効期限、ランダム値）を検討しているが、Issue #11の到着機構は未確定で、このリクエスト・レスポンスは提案であって提供済みAPIではない。採用時は期限切れ、改変、別会場の証明を拒否し、MemorySessionへ到着イベントを作り、有効なExperienceLinkがある場合だけ対応するLivePresenceSessionを`arrived`へ変更する。到着時に撮影通知を停止・削除する設計だが、通知自体も未実装なら利用可能と案内しない。通常GPSは本人が継続可否を選ぶまで自動停止しない。
 
 ### `POST /v1/live-presence-sessions/{liveSessionId}/on-site`
 
@@ -199,7 +207,7 @@ Header: `Idempotency-Key: random-value`
 }
 ```
 
-`continue: true`では必要な追加同意を検証して`on_site`へ移行する。`continue: false`では追跡を停止し、最新表示位置を消去して`ended`へ移行する。会場内GPSが不十分な場合、サーバー設定により`point`、`area`、`interaction_only`の表示粒度を返す。
+`continue: true`は既に`arrived`であるLivePresenceSessionだけが要求でき、本人が用途・表示粒度を理解して明示的に追加同意した版を検証してから`on_site`へ移行する。`approaching`から直接移行しない。`continue: false`では追跡を停止し、最新表示位置を消去して`ended`へ移行する。会場内GPSが不十分な場合、サーバー設定により`point`、`area`、`interaction_only`の表示粒度を返す。到着証明の具体的な仕組みは未確定であり、到着を経ずに会場内表示を許可しない。
 
 ## 追跡停止
 
@@ -231,9 +239,17 @@ Live用トークンで認証し、最新表示位置、LivePresenceSession、ト
 
 ### `DELETE /v1/experiences/{experienceId}`
 
-Header: `Idempotency-Key: random-value`
+Headers: `Authorization: Bearer <memory-participant-token>`、`X-Trace-Live-Token: <live-participant-token>`、`Idempotency-Key: <same-key-for-retry>`。リクエストbodyなし。両方のセッションとトークンが揃っている場合にだけ使用する。最初からLiveがない場合、または片側を個別DELETEで削除済みの場合は残る側の個別DELETEを使用する。
 
-Memory用・Live用の両トークンを要求し、二つの削除を独立に実行する。一方が一時失敗した場合は完了済み側を復活させず、未完了側だけを再試行できる結果を返す。すべての削除APIは、同じ`Idempotency-Key`による再送だけ、個人データを持たない24時間以内の削除済み記録から同じ結果を返す。写真オブジェクト削除の確認とインフラログ・バックアップの扱いは[プライバシー設計](privacy.md)に従う。
+```json
+{
+  "memory": "pending",
+  "live": "deleted",
+  "complete": false
+}
+```
+
+成功または部分成功をHTTP `200`で返す。Live側を先に削除・削除記録と一緒に確定し、続いてMemory側を別トランザクションで削除する。最初のLive削除が失敗した場合はエラーとして返し、同じキーで再送する。Live削除後にMemory削除が失敗した場合は`memory: "pending"`、`live: "deleted"`、`complete: false`を返す。一方の失敗で完了側を復活させない。`pending`や通信失敗の場合、端末は両方の資格情報と同じ冪等性キーを保持して同じリクエストを再送する。完了済み側は24時間の削除記録から結果を再現し、未完了側だけを再試行する。両方が`deleted`の場合だけ`complete: true`を返す。片方のトークンだけで両方を削除しない。写真オブジェクト削除の確認とインフラログ・バックアップの扱いは[プライバシー設計](privacy.md)に従う。
 
 ## 写真撮影・保存
 
@@ -355,24 +371,32 @@ Header: `Idempotency-Key: random-value`
 
 ### `GET /v1/experiences/{experienceId}`
 
-参加端末が再接続後に状態を復元するために使用する。位置点そのものは返さない。
+参加端末が再接続後に状態を復元するために使用する。従来どおり`Authorization: Bearer <memory-participant-token>`で本人認証し、MemorySessionの`deleteAfter`まで取得できる。ExperienceLinkで結ばれたLivePresenceSessionが残る場合、その状態・期限と共有aliasだけを返し、Live用トークンも位置点そのものも返さない。MemorySessionが先に削除された場合、このGETは使えないが、Live本人用トークンでの個別削除はLive自身の`deleteAfter`まで可能である。両トークンを必須とするのは両セッションDELETEだけである。
 
 ```json
 {
-  "memorySessionId": "memory-session-id",
-  "livePresenceSessionId": "live-session-id",
-  "trackingStatus": "tracking",
-  "presencePhase": "arrived",
+  "memorySession": {
+    "sessionId": "mem_example",
+    "expiresAt": "2026-07-13T18:00:00Z",
+    "deleteAfter": "2026-07-14T18:00:00Z"
+  },
+  "livePresenceSession": {
+    "sessionId": "live_example",
+    "trackingStatus": "tracking",
+    "presencePhase": "arrived",
+    "expiresAt": "2026-07-13T18:00:00Z",
+    "deleteAfter": "2026-07-14T18:00:00Z"
+  },
   "replayStatus": "queued",
   "stopReason": null,
   "displayAlias": {"color": "cyan", "symbol": "circle"},
   "photoSummary": {"ready": 4, "pending": 1, "failed": 0, "maxCount": 12},
   "queuePosition": 1,
-  "estimatedWaitSeconds": 15,
-  "expiresAt": "2026-07-13T18:00:00Z",
-  "deleteAfter": "2026-07-14T12:20:00Z"
+  "estimatedWaitSeconds": 15
 }
 ```
+
+写真件数は写真機能実装後、MemorySessionに紐づくPhotoMomentから算出する。現在のBackendは写真機能を提供せず、`photoSummary`は空の状態（`ready`/`pending`/`failed`が0件、`maxCount`が12）のみ返す。LivePresenceSessionが存在しない場合は`livePresenceSession`を省略する。写真・通知APIはこの例に登場するだけで提供済みとみなさない。
 
 ## 運営API
 
