@@ -48,7 +48,7 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 
 - Web AppはReact / Next.jsを使用する
 - BackendはGoを使用する
-- 描画はUnityまたはTouchDesignerを比較後に決定する
+- 描画はUnityまたはTouchDesignerを比較する既存方針にthree.jsを候補として追加し、採用後に構成・描画クライアントの配置を更新する
 - MVPからマネージドPostgreSQLを正本とし、Google CloudではCloud SQL、AWSではRDSを使用する
 - Next.jsはVercel、Go BackendはGoogle Cloud東京を第一候補とし、大学の既存契約・審査によりAWS東京へ切り替えられるコンテナ構成にする
 - 写真本体はDBへ保存せず、非公開のCloud StorageまたはS3へ保存する
@@ -65,15 +65,15 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 
 ## 未決事項
 
-- 展示日と制作期限
-- 想定する最大同時参加人数
+- [再設定した作業期限](project-plan.md#残り日程の再設定作業案)の承認（展示は2026年10月31日〜11月1日、芝浦工業大学豊洲キャンパス教室棟3F301で両日10:00〜18:00）
+- 本番の最大同時参加人数（試験後にIssue #15で決定。予測参加人数50人/日、希望値100人/日とは別）
 - 大学の位置情報利用・ネットワーク利用許可
 - データ保存期間
-- UnityまたはTouchDesignerの最終選択
+- TouchDesigner / Unity / three.js の比較と最終選択
 - 3Dキャンパスモデルの制作方法
 - Google CloudまたはAWSの最終選択と大学承認
 - PostgreSQLのversion、可用性構成、instance size、接続上限
 - 写真オブジェクトストレージの提供者、保存地域、削除保証
 - キャンパス経路グラフの作成・更新責任者
 - 対応OS・ブラウザの最低バージョン
-- 当日の役割担当者、予算、調達期限
+- 当日の運営担当と新規調達の要否（予算上限5,000円、企画・課金責任者はMino829）
