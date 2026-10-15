@@ -1,6 +1,6 @@
 # TRACE 現在計画
 
-- 更新日: 2026-08-21
+- 更新日: 2026-10-15
 - 状態: 企画・技術検証中
 - 用途: 会議共有用スナップショット
 
@@ -11,6 +11,8 @@ TRACEは、キャンパスを歩く参加者が写真に残した瞬間と、そ
 参加者は写真を撮ることで自分の思い出を作る。システムは写真撮影地点を記憶の節目として扱い、撮影時のGPSとキャンパス内の歩行可能経路から、写真と写真の間の道を再構成する。
 
 写真メモリーと並行して、希望する参加者は入口から展示終了までリアルタイム位置表現へ参加できる。展示場では、到着前にキャンパスを移動している参加者と、到着後に会場内を動く参加者の両方を表現する。写真メモリーとリアルタイム位置は、同じ参加体験の中で動くが、目的、同意、セッション、保存方針を分離する。
+
+会期は2026年10月31日〜11月1日、会場は芝浦工業大学豊洲キャンパス教室棟3F301。開場時間は両日10:00〜18:00。企画・バックエンドはMino829、フロントエンドはcode-yutoとuni-bit、会場描画はcode-yuto、広報・デザイン等はmfunatsu2727-svg、cocoon、tmk-05が担当する。予算上限は5,000円、課金責任者はMino829。描画方式はTouchDesigner / Unity / three.jsを候補とし、採用・公開承認は未決。
 
 ## 2. 作品を一文で表すと
 
@@ -266,7 +268,7 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 | 写真 | 非公開Cloud StorageまたはS3。DBにはobject keyだけを保存 |
 | 最新表示位置 | 単一BackendではGoメモリ、複数Backend化時はRedis互換TTLストア |
 | 経路探索 | バージョン付きCampusGraph、A*またはDijkstra |
-| 描画 | UnityまたはTouchDesigner |
+| 描画 | Unity / TouchDesignerを既存候補とし、three.jsも比較候補。最終選定は未決 |
 | 到着 | 署名・期限付きQR、将来NFC |
 | Spatial Contract | `coordinateVersion` / `campusGraphVersion` / `threeDMapVersion` |
 
@@ -339,7 +341,7 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 
 - Web・Backend、3D・映像、現地検証・運用・個人情報確認の責任を分ける
 - 一人または短期間の場合は、正確な会場内点表示、通知、3D装飾の順に縮小する
-- UnityとTouchDesignerを長期間並行開発せず、技術検証後に一方へ決める
+- 描画候補を長期間並行開発せず、同じ合成データで比較して採用方式を一つに決める
 - 3Dモデル完成を待たず、主要導線の簡易モデルで写真ピンと経路を先に通す
 - 大学相談を実装完了後へ回さず、技術検証と並行する
 
@@ -358,7 +360,7 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 
 ### 企画
 
-- 展示日、場所、開場時間、対象者
+- 本番の最大同時参加人数は会場導線・回線・負荷試験の後にIssue #15で判断する。予測参加人数50人/日、希望値100人/日、暫定負荷試験の50同時追跡を本番上限と混同しない
 - 写真ストーリーを端末保存だけにするか、静止画書き出しを作るか
 - 将来、友人共有やVlog生成を行うか
 - 展示Aと展示Bで色・記号を共有するか
@@ -373,7 +375,7 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 
 ### 技術・運用
 
-- UnityまたはTouchDesigner
+- 会場描画方式（TouchDesigner / Unity / three.js の比較候補）
 - Google CloudまたはAWSの最終選択と大学承認
 - PostgreSQLのversion、可用性構成、instance size、接続上限
 - Backendを複数インスタンス化する負荷・障害要件の閾値

@@ -10,7 +10,7 @@
 - Backend: Go
 - Realtime: WebSocket
 - Rendering: Unity または TouchDesigner
-- Deployment: Vercel + Google Cloud東京を第一候補、AWS東京を代替
+- Deployment: Cloudflare + Google Cloud東京を第一候補、AWS東京を代替
 - Storage: マネージドPostgreSQL（Cloud SQLまたはRDS）
 - Photo Storage: 非公開オブジェクトストレージ（Cloud StorageまたはS3）
 - Route Reconstruction: バージョン付きキャンパス経路グラフ / A*またはDijkstra
