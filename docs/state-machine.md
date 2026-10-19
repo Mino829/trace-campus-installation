@@ -17,7 +17,7 @@
 stateDiagram-v2
     [*] --> Tracking: consent accepted
     Tracking --> Stopped: participant or operator stops
-    Tracking --> Expired: session timeout
+    Tracking --> Expired: expires_at reached
     Stopped --> [*]
     Expired --> [*]
 ```
@@ -32,7 +32,9 @@ stateDiagram-v2
 |---|---|---|---|
 | - | `live_presence.created` | `tracking` | 専用トークン、追跡失効、削除期限を発行 |
 | `tracking` | `tracking.stop` | `stopped` | `stop_reason`を記録し、以降の位置点を拒否 |
-| `tracking` | `live_presence.expire` | `expired` | トークンを無効化し、以降の位置点を拒否 |
+| `tracking` | `live_presence.expire` | `expired` | 位置送信用資格を失効させ、最新表示位置を破棄して以降の位置点を拒否。状態取得と自己削除用の資格は`delete_after`まで保持 |
+
+MemorySessionも自身の`expires_at`後に追跡操作を停止する一方、各セッションは自身の`delete_after`まで本人の読み取り・自己削除を受け付ける。`expires_at`と`delete_after`を同一視しない。
 
 ## 会場内フェーズ
 
@@ -40,7 +42,7 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> Approaching: live presence created
     Approaching --> Arrived: arrival accepted and linked
-    Arrived --> OnSite: additional consent accepted
+    Arrived --> OnSite: explicit additional consent accepted
     Arrived --> Ended: participant stops
     OnSite --> Ended: participant stops or session expires
 ```
@@ -50,7 +52,7 @@ stateDiagram-v2
 - `on_site`: 用途・粒度を示した追加同意後。原則エリア表示とし、精度不足時は操作時だけの表示へ落とす
 - `ended`: 表示終了。最新位置を削除する
 
-ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`への遷移は到着QRだけでは行わず、追加同意版を必須にする。
+ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`は有効な到着処理で`arrived`になったセッションからだけ進める。到着QRの受付だけでは移行せず、会場内用途・表示粒度を示した本人の明示的な追加同意版を必須にする。到着証明の具体的な仕組みはIssue #11で未決定。
 
 ## 写真状態
 
@@ -118,7 +120,7 @@ stateDiagram-v2
 
 ## 削除
 
-削除は状態遷移ではなくデータ消去である。MemorySession削除とLivePresenceSession削除を分け、「両方を削除」では各処理を独立して完了させる。片方を削除した時点でExperienceLinkを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。削除後は同じトークンで状態を復元できない。同じ削除要求の安全な再送に限り、写真、位置、セッション内容を持たない短期の冪等性記録から成功結果を返す。
+削除は状態遷移ではなくデータ消去である。MemorySession削除とLivePresenceSession削除を分け、両トークンを要求する`DELETE /v1/experiences/{experienceId}`では各処理を独立して完了させる。`Authorization`にはMemory用Bearer token、`X-Trace-Live-Token`にはLive用tokenを渡し、bodyなし、`Idempotency-Key`を付ける。HTTP 200の`{memory: "deleted"|"pending", live: "deleted"|"pending", complete: boolean}`で各側の結果を返す。一方が`pending`または通信失敗なら、両資格情報と同じキーを保持して再送し、完了側を復活させず未完了側だけ進める。別の個別DELETEで一方を消した後は残る側の個別DELETEを使う。片方を削除した時点でExperienceLinkを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。同じキーによる安全な再送に限り、IDやトークン、写真、位置、セッション内容を持たない24時間以内の短期削除記録から進捗を復元する。
 
 ## 異常系
 

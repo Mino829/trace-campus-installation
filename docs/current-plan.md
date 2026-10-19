@@ -235,14 +235,14 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 
 ### セッション間の引き継ぎ契約
 
-- `MemorySession`と`LivePresenceSession`は別ID・別同意版・別状態・別削除期限を持つ
+- `MemorySession`と`LivePresenceSession`は別ID・別同意版・別状態・別`expires_at`・別`delete_after`を持つ。追跡失効後も各削除期限までは本人の状態・閲覧・自己削除を許す
 - 参加端末は各セッション用の別トークンを保持する。片方のトークンで他方の写真・位置を操作できない
-- 両方へ参加する場合だけ、短時間の`ExperienceLink`で同じ端末上の引き継ぎを行う
-- `ExperienceLink`は色・記号と到着処理の連携だけに使い、写真、生GPS、経路を複製しない
-- 到着QRはMemorySessionへ到着イベントを作り、LivePresenceSessionを`arrived`へ変更する
-- `on_site`を希望する場合だけ、必要な追加同意後にLivePresenceSessionを継続する
-- 「すべて削除」は有効な両トークンを使って両セッションを削除し、一方だけの削除も選べる
-- `ExperienceLink`は到着、片方の削除、期限切れから24時間以内の最短時点で削除する
+- 両方へ参加する場合だけ`ExperienceLink`で同じ端末上の引き継ぎを行う。連携用トークンは短期失効、状態表示のための最小限の関連付けは片方の削除または早い`delete_after`まで保持する
+- `ExperienceLink`は色・記号、到着処理、Memory BearerでのLiveの状態・期限取得に限り、写真、生GPS、経路、Liveのトークンを複製しない
+- 到着処理でMemorySessionへ到着イベントを作り、紐づくLivePresenceSessionを`arrived`へ変更する。到着証明の具体的方法はIssue #11で未決定
+- `on_site`を希望する場合だけ、`arrived`の後に用途・粒度への本人の明示的な追加同意を得てLivePresenceSessionを継続する
+- 「すべて削除」はMemory用BearerとLive用ヘッダーの両資格情報で独立に削除し、一方が`pending`なら両資格情報と同じ冪等性キーで再送する。片方を個別削除済みなら残る側だけを個別削除する
+- セッション等の識別子は既存のプレフィックス付き不透明TEXT IDを保持する。通常GPSの最新表示位置は単一Go APIインスタンスのメモリへ30〜60秒TTLで置き、PostgreSQLに保存しない
 
 ## 8. プライバシー・安全
 
