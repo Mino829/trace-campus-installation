@@ -440,7 +440,7 @@ sequenceDiagram
 | 代替参加の処理 | ユースケースだけに記載し、端末間フローには含めていない | QRチェックポイントのAPI、合成軌跡の生成主体、到着キューへ入れる条件 |
 | クラウド提供者 | Vercel + Google Cloud東京を第一候補、AWS東京を代替とする | 大学の既存契約、保存地域、個人情報審査に基づく最終承認 |
 | PostgreSQL構成 | MVPからCloud SQLまたはRDSのマネージドPostgreSQLを正本とする | version、可用性、instance size、接続上限、バックアップ保持期間 |
-| 描画ソフト | UnityまたはTouchDesignerと併記している | 最終的に使用するソフトと、WebSocketイベントを受け取る実装担当 |
+| 描画ソフト | 図はUnityまたはTouchDesignerの既存案。three.jsも比較候補だが未採用 | 最終方式と描画クライアントの配置先・通信契約を決める。実作業担当はcode-yuto |
 | Raspberry Pi・音響・照明 | 候補または任意接続として点線で表している | MVPに含める範囲、接続方式、障害時に切り離せる条件 |
 
 ### 統合時の更新ルール
