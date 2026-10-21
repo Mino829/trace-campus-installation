@@ -1,6 +1,6 @@
 # API・WebSocket仕様
 
-この文書はIssue #11で合意した実装目標の契約を含む設計仕様であり、全APIが現行Backendで提供済みであることを示さない。到着証明の実現方法と大学のプライバシー審査（#9）は未完了。
+この文書はIssue #11で合意した実装目標の契約を含む設計仕様であり、全APIが現行Backendで提供済みであることを示さない。到着証明は展示ブースで投影する署名付きQRとする（Mino829/TRACE_F#10）。大学のプライバシー審査（#9）は未完了。
 
 ## 共通方針
 
@@ -132,7 +132,6 @@
     "expiresAt": "2026-07-13T18:00:00Z",
     "deleteAfter": "2026-07-14T18:00:00Z"
   },
-  "displayAlias": {"color": "cyan", "symbol": "circle"},
   "positionIntervalSeconds": 5
 }
 ```
@@ -188,15 +187,12 @@ Header: `Idempotency-Key: random-value`
 {
   "arrivalId": "arrival-id",
   "status": "queued",
-  "queuePosition": 1,
-  "estimatedWaitSeconds": 15,
   "livePresencePhase": "arrived",
-  "onSiteChoiceRequired": true,
-  "displayAlias": {"color": "cyan", "symbol": "circle"}
+  "onSiteChoiceRequired": true
 }
 ```
 
-到着証明として展示場入口で定期更新する署名付きQR（`checkpointId`、会場、発行時刻、有効期限、ランダム値）を検討しているが、Issue #11の到着機構は未確定で、このリクエスト・レスポンスは提案であって提供済みAPIではない。採用時は期限切れ、改変、別会場の証明を拒否し、MemorySessionへ到着イベントを作り、有効なExperienceLinkがある場合だけ対応するLivePresenceSessionを`arrived`へ変更する。到着時に撮影通知を停止・削除する設計だが、通知自体も未実装なら利用可能と案内しない。通常GPSは本人が継続可否を選ぶまで自動停止しない。
+到着証明は、展示ブースのプロジェクター映像に表示し定期更新する署名付きQR（`checkpointId`、会場、発行時刻、有効期限、ランダム値）とする（Mino829/TRACE_F#10）。参加者は展示ブースの列に並び、自分の番でWeb App内のカメラからこのQRを読み取る。Web App内で読み取るため、到着を読み取った端末のMemorySessionへ結び付けられる。待ち順は人の列で扱い、参加端末へ順番、予想待ち時間、色・記号を返さない。このリクエスト・レスポンスは提案であって提供済みAPIではない。採用時は期限切れ、改変、別会場の証明を拒否し、MemorySessionへ到着イベントを作り、有効なExperienceLinkがある場合だけ対応するLivePresenceSessionを`arrived`へ変更する。到着時に撮影通知を停止・削除する設計だが、通知自体も未実装なら利用可能と案内しない。通常GPSは本人が継続可否を選ぶまで自動停止しない。
 
 ### `POST /v1/live-presence-sessions/{liveSessionId}/on-site`
 
@@ -207,7 +203,7 @@ Header: `Idempotency-Key: random-value`
 }
 ```
 
-`continue: true`は既に`arrived`であるLivePresenceSessionだけが要求でき、本人が用途・表示粒度を理解して明示的に追加同意した版を検証してから`on_site`へ移行する。`approaching`から直接移行しない。`continue: false`では追跡を停止し、最新表示位置を消去して`ended`へ移行する。会場内GPSが不十分な場合、サーバー設定により`point`、`area`、`interaction_only`の表示粒度を返す。到着証明の具体的な仕組みは未確定であり、到着を経ずに会場内表示を許可しない。
+`continue: true`は既に`arrived`であるLivePresenceSessionだけが要求でき、本人が用途・表示粒度を理解して明示的に追加同意した版を検証してから`on_site`へ移行する。`approaching`から直接移行しない。`continue: false`では追跡を停止し、最新表示位置を消去して`ended`へ移行する。会場内GPSが不十分な場合、サーバー設定により`point`、`area`、`interaction_only`の表示粒度を返す。到着を経ずに会場内表示を許可しない。
 
 ## 追跡停止
 
@@ -389,10 +385,7 @@ Header: `Idempotency-Key: random-value`
   },
   "replayStatus": "queued",
   "stopReason": null,
-  "displayAlias": {"color": "cyan", "symbol": "circle"},
-  "photoSummary": {"ready": 4, "pending": 1, "failed": 0, "maxCount": 12},
-  "queuePosition": 1,
-  "estimatedWaitSeconds": 15
+  "photoSummary": {"ready": 4, "pending": 1, "failed": 0, "maxCount": 12}
 }
 ```
 
@@ -530,7 +523,7 @@ WebSocketのping/pongまたはアプリheartbeatを10秒間隔で送り、30秒�
 - 復旧後は新しく取得した最新位置から送信を再開する
 - スナップショットには生成時点の`eventId`または連番を含め、それ以前の差分を二重適用しない
 
-参加トークンはURLや永続的な`localStorage`へ置かず、同じタブの再読込に必要な範囲で`sessionStorage`へ保存する。加工済み写真と写真撮影時GPSだけはIndexedDB等へ上限付きで保存し、送信成功、写真削除、セッション削除、失効時に消去する。通常GPSは保存しない。写真は12枚・合計30MBを超えて端末へ保持しない。複数タブはBroadcastChannel等で既存セッションを検知し、二重の位置監視や写真送信を開始しない。
+参加トークンはURLへ置かず、`localStorage`へ保存する。通知や別タブから開き直しても同じセッションを続けるためである。本人による削除と`deleteAfter`の到達を検知したら、端末から消去する。加工済み写真と写真撮影時GPSだけはIndexedDB等へ上限付きで保存し、送信成功、写真削除、セッション削除、失効時に消去する。通常GPSは保存しない。写真は12枚・合計30MBを超えて端末へ保持しない。複数タブはBroadcastChannel等で既存セッションを検知し、二重の位置監視や写真送信を開始しない。
 
 ## HTTPステータス方針
 

@@ -15,12 +15,12 @@
 
 ## ユースケース図
 
-位置情報を提供しない来場者も展示を観覧でき、位置取得不能時はQRチェックポイントまたは合成軌跡による代替参加を利用できる前提です。
+カメラや位置情報を提供しない来場者は参加せず、展示を観覧できる前提です。代替参加は用意しません。
 
 ```mermaid
 flowchart LR
     Participant["参加者"]
-    Visitor["位置情報を提供しない来場者"]
+    Visitor["参加しない来場者"]
     Operator["運営者"]
     PrimaryRenderer["主描画機"]
     StandbyRenderer["待機描画機"]
@@ -33,9 +33,7 @@ flowchart LR
         UC05(["追跡を停止する"])
         UC06(["保存済みデータを削除する"])
         UC07(["到着チェックインする"])
-        UC08(["待ち順・自分の記号を確認する"])
         UC09(["到着演出をスキップする"])
-        UC10(["代替体験へ参加する"])
         UC11(["展示を観覧する"])
 
         UC20(["追跡数・キュー・描画状態を監視する"])
@@ -56,12 +54,9 @@ flowchart LR
     Participant --> UC05
     Participant --> UC06
     Participant --> UC07
-    Participant --> UC08
     Participant --> UC09
-    Participant --> UC10
     Participant --> UC11
 
-    Visitor --> UC10
     Visitor --> UC11
 
     Operator --> UC20
@@ -82,7 +77,7 @@ flowchart LR
 - 参加者、運営者、描画機は別々の資格情報を使用する
 - 待機描画機は通常表示とスナップショットを受信できるが、演出完了を確定できない
 - 運営操作は運営者だけが実行でき、操作履歴を残す
-- 観覧や代替体験に位置情報の同意を必須としない
+- 観覧に位置情報の同意を必須としない
 
 ## 配置図
 
@@ -92,7 +87,7 @@ flowchart LR
 flowchart TB
     subgraph ParticipantDevice["参加者スマートフォン"]
         MobileBrowser["ブラウザ<br/>Next.js Web App<br/>Geolocation API"]
-        MobileStorage["sessionStorage<br/>IndexedDB等"]
+        MobileStorage["localStorage<br/>IndexedDB等"]
         MobileBrowser --- MobileStorage
     end
 
@@ -285,14 +280,14 @@ sequenceDiagram
         Browser-->>User: 追跡状態と最終送信時刻を表示
     end
 
-    User->>Browser: 展示場入口の到着QRを読み取る
+    User->>Browser: 展示ブースに投影された到着QRを読み取る
     Browser->>API: POST /v1/memory-sessions/{id}/arrival<br/>Idempotency-Key・署名付き到着証明
     API->>API: 署名・会場・有効期限・再利用を検証
     API->>DB: ArrivalEventをqueuedで作成<br/>リンク済みLivePresenceをarrivedへ更新
     DB-->>API: arrivalId・キュー状態
     API-->>Renderer: participant.arrived<br/>arrivalId・alias・加工済み軌跡
-    API-->>Browser: queuePosition・待ち時間・alias
-    Browser-->>User: 到着待ち状態、色・記号、<br/>リアルタイム停止または会場内継続を表示
+    API-->>Browser: arrivalId・到着状態
+    Browser-->>User: 到着済みの状態、<br/>リアルタイム停止または会場内継続を表示
     opt 参加者が会場内継続を選ぶ
         Browser-->>User: on_siteの用途・粒度を説明し追加同意
         Browser->>API: POST /v1/live-presence-sessions/{id}/on-site
@@ -350,7 +345,7 @@ sequenceDiagram
         DB-->>API: 削除完了
         API-->>Renderer: tracking.stopped
         API-->>Browser: 204 No Content
-        Browser->>Browser: sessionStorageのトークンを消去
+        Browser->>Browser: localStorageのトークンを消去
         Browser-->>User: 削除完了を表示
         Note over Browser,DB: 削除後は同じトークンで状態を復元できない
     end
@@ -385,9 +380,9 @@ sequenceDiagram
     else スマートフォンを再読込
         Browser->>API: GET /v1/experiences/{experienceId}<br/>端末内の各Bearer token
         API->>DB: 状態を取得
-        DB-->>API: 追跡・再生・期限・alias
+        DB-->>API: 追跡・再生・期限
         API-->>Browser: 位置点を含まない現在状態
-        Browser-->>User: 追跡中・到着待ち・完了の画面を復元
+        Browser-->>User: 追跡中・到着後・完了の画面を復元
     end
 
     alt 描画機またはWSSが切断
@@ -437,7 +432,6 @@ sequenceDiagram
 | 未来時刻の位置点 | 図では「入力検証」とだけ記載し、処理を確定していない | `FUTURE_TIME`として拒否するか、受信時刻へ補正するか。API仕様と座標変換資料で記述が異なる |
 | 描画へ渡す誤差情報 | 図では「不確実性」と表記している | `accuracyM`と`uncertaintyM`のどちらを正式名称にするか、生の精度か加工後の値か |
 | 到着後のリアルタイム位置 | `arrived`で停止か追加同意による`on_site`を選ぶ | on_siteの点・エリア・操作時表示の採用基準 |
-| 代替参加の処理 | ユースケースだけに記載し、端末間フローには含めていない | QRチェックポイントのAPI、合成軌跡の生成主体、到着キューへ入れる条件 |
 | クラウド提供者 | Vercel + Google Cloud東京を第一候補、AWS東京を代替とする | 大学の既存契約、保存地域、個人情報審査に基づく最終承認 |
 | PostgreSQL構成 | MVPからCloud SQLまたはRDSのマネージドPostgreSQLを正本とする | version、可用性、instance size、接続上限、バックアップ保持期間 |
 | 描画ソフト | 図はUnityまたはTouchDesignerの既存案。three.jsも比較候補だが未採用 | 最終方式と描画クライアントの配置先・通信契約を決める。実作業担当はcode-yuto |
