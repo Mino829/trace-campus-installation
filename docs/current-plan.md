@@ -263,9 +263,9 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 | Web App | React / Next.js |
 | Backend | Go |
 | Realtime | 入口から終了までの展示Bと描画機でWebSocket |
-| Deployment | Vercel + Google Cloud東京を第一候補、AWS東京を代替 |
-| DB | MVPからマネージドPostgreSQL。Cloud SQLまたはRDS |
-| 写真 | 非公開Cloud StorageまたはS3。DBにはobject keyだけを保存 |
+| Deployment | CloudflareサイトWorker + Google Cloud東京を技術選択。公開は大学・予算承認後 |
+| DB | 東京のCloud SQL for PostgreSQL 17 |
+| 写真 | 東京の非公開Cloud Storage。DBにはobject keyだけを保存 |
 | 最新表示位置 | 単一BackendではGoメモリ、複数Backend化時はRedis互換TTLストア |
 | 経路探索 | バージョン付きCampusGraph、A*またはDijkstra |
 | 描画 | Unity / TouchDesignerを既存候補とし、three.jsも比較候補。最終選定は未決 |
@@ -375,8 +375,8 @@ LivePresenceSessionへ写真、生GPS履歴、MemorySessionの再構成経路を
 ### 技術・運用
 
 - 会場描画方式（TouchDesigner / Unity / three.js の比較候補）
-- Google CloudまたはAWSの最終選択と大学承認
-- PostgreSQLのversion、可用性構成、instance size、接続上限
+- CloudflareとGoogle Cloud東京の提供者・処理地域に関する大学承認、公開経路と費用の確認
+- Cloud SQL PostgreSQL 17の可用性構成、instance size、接続上限、バックアップ/PITR
 - Backendを複数インスタンス化する負荷・障害要件の閾値
 - CampusGraphの作成・更新担当者
 - 対応OS・ブラウザ

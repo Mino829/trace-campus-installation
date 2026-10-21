@@ -10,15 +10,15 @@
           |
           | HTTPS
           v
-Vercel
-  Next.js Web App
+Cloudflare サイトWorker
+  Next.js静的Web配信 / /api/backend/* 中継
           |
-          | HTTPS / WSS
+          | HTTPS（参加者API）
           v
-承認済みクラウドの東京リージョン
-  Go Backendコンテナ
-  マネージドPostgreSQL
-  非公開オブジェクトストレージ
+Google Cloud東京（採用する配置先、大学承認前）
+  Cloud Run: Go Backend
+  Cloud SQL for PostgreSQL 17: 正本DB
+  非公開Cloud Storage: 加工済み写真
           |
           | WSS（描画機から外向き接続）
           v
@@ -29,19 +29,21 @@ Unity または TouchDesigner
 プロジェクター / 音響 / 照明
 ```
 
-本番はNext.jsをVercelへ配置し、Go Backend、DB、非公開オブジェクトストレージを承認済みクラウドの東京リージョンへ置く。第一候補はGoogle CloudのCloud Run、Cloud SQL for PostgreSQL、Cloud Storageとし、大学の既存契約・審査がAWSを優先する場合はAWS東京のコンテナ実行環境、RDS for PostgreSQL、S3へ切り替える。GoはOCI互換コンテナ、DBは標準PostgreSQLを基本として移植性を保つ。
+本番構成の技術方針はNext.jsの静的書き出しをCloudflareのサイトWorkerで配信し、Go BackendをCloud Run、正本DBをCloud SQL for PostgreSQL 17、加工済み写真を非公開Cloud Storage bucket（いずれも東京）へ置く。大学の提供者・保存/処理地域と費用の承認は未完了。AWS等への変更は別途決定する。
 
-参加者端末と描画機はGo Backendへ外向き接続する。会場PC上のGo Backendは開発または公開環境が使用不能な場合の緊急構成とし、本番正本へ同時書き込みしない。写真原画像や画像URLは描画機へ送らない。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
+参加者端末は同一オリジンの`/api/backend/*`を通じてGoへ送信する。ただし写真本体はGoが発行する短期署名URLへCloud Storageへ直接PUTする設計で、現行Workerの16KB JSON中継では転送しない。写真APIのWorker許可リストとCloud StorageのCORSは未実装・未検証。描画機はGoへ外向きWSS接続する設計だが認証・公開経路は未確定で、現行Worker中継には含まれない。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。写真原画像や画像URLは描画機へ送らない。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
 
 ## データ配置
 
 | データ | 保存先 | 方針 |
 |---|---|---|
 | セッション、同意、写真メタデータ、到着、再構成経路 | PostgreSQL | 本番の単一正本。期限削除とバックアップ保持を管理する |
-| 加工済み写真 | 非公開Cloud StorageまたはS3 | DBにはobject keyだけを保存し、短時間の署名付きアクセスを使う |
+| 加工済み写真 | 非公開Cloud Storage（東京） | DBにはobject keyだけを保存し、短時間の署名付きアクセスを使う。公開前に処理地域・削除を承認する |
 | 通常GPSの生座標 | 保存しない | リクエスト処理中に検証・変換後、破棄する |
 | 量子化済み最新表示位置 | Goメモリ、拡張時はRedis互換TTLストア | 30〜60秒TTL。PostgreSQLの位置履歴にしない |
 | 合成データ | local / stagingと会場PC | 本番参加者データから作らない |
+
+CloudflareのWorker・転送経路と調査用`trace-push`のD1/KVは東京保存・処理の保証対象ではない。後者を本番の参加者データの正本に流用せず、通知購読情報の本番保存先は別途決定する。
 
 ## 拡張境界
 
@@ -143,6 +145,7 @@ MVPではGo Backendを単一の主インスタンスとして開始し、50同�
 
 ## セキュリティ境界
 
+- サイトWorkerは許可したAPIだけを中継し、サーバー側のedge secretでGoの`/v1/*`への到達を制限する。Bearerは参加者の個別認証であり、edge secretをブラウザ・描画機へ公開しない。CI・運営のCloud Run操作はIAMを使う
 - 参加者、運営、描画の資格情報とAPI権限を分離する
 - 参加者トークンをURL、アクセスログ、描画イベントへ含めない
 - 運営APIは公開参加経路と分離し、短期資格情報と操作履歴を使用する
