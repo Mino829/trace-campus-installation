@@ -251,9 +251,11 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`X-Trace-Live-Toke
 
 ブラウザで向き補正、EXIF除去、縮小、再エンコードを行った後、非公開オブジェクトストレージへアップロードする。Backendは申告値だけを信用せず、保存後に形式、寸法、容量、EXIF不在、ハッシュを検証して`ready`へ変更する。
 
+Backend Issue #6の以下の記述は対応PR適用後の契約であり、mainへの反映・配備済みを示さない。非公開Cloud Storageを明示設定した場合だけ新規写真を有効にし、既定では無効とする。大学承認・実データ利用の許可を意味しない。経路・写真ピン・フォトスポットは別Issueであり、イベントや経路の記述は引き続き実装目標を含む。
+
 ### `GET /v1/memory-sessions/{memorySessionId}/photos`
 
-再読込・再接続時にPhotoMomentのID、撮影順、`pending`、`ready`、`failed`状態を返す。画像URLは返さない。期限切れの`pending`には新しいアップロードURLを要求できるが、端末内に対応する加工済み写真がない場合は再アップロード不能として削除を案内する。
+再読込・再接続時にPhotoMomentのID、`clientPhotoId`、撮影時刻、受付順の`sequenceNo`、`pending`、`ready`、`failed`、`deleting`状態を撮影時刻順に返す。画像URLは返さない。期限切れの`pending`には新しいアップロードURLを要求できるが、端末内に対応する加工済み写真がない場合は再アップロード不能として削除を案内する。
 
 ### `POST /v1/memory-sessions/{memorySessionId}/photos`
 
@@ -284,25 +286,35 @@ Header: `Idempotency-Key: random-value`
   "photoMomentId": "photo-moment-id",
   "status": "pending",
   "uploadUrl": "short-lived-private-upload-url",
+  "uploadHeaders": {
+    "Content-Type": "image/jpeg",
+    "Content-Length": "820000",
+    "x-goog-if-generation-match": "0",
+    "Cache-Control": "private, no-store, max-age=0"
+  },
   "uploadExpiresAt": "2026-07-13T12:10:00Z"
 }
 ```
 
-クライアントは指定された`Content-Type`と申告したサイズの画像だけを`PUT uploadUrl`で送る。アップロードURLは対象オブジェクトへの書き込みだけを許可し、読み取り、上書き、一覧取得を許可しない。
+クライアントは`uploadHeaders`を使用して申告したサイズの画像だけを`PUT uploadUrl`で送る。ブラウザの`Content-Length`はBlobサイズから自動設定し、その他の返却ヘッダーは変更しない。URLの期限は5分とMemorySessionの`expiresAt`の早い方までとし、新規作成専用のgeneration条件で上書きを禁止する。読み取り・一覧取得には使えない。同じ登録要求は同じPhotoMomentへ集約し、内容が異なる再送は409、削除済み写真の同じ登録再送は404とする。登録再送時にURL期限が切れていれば`uploadUrl`を省略し、次の再発行APIを使用する。
 
 ### `POST /v1/memory-sessions/{memorySessionId}/photos/{photoMomentId}/upload-url`
 
-`pending`かつ有効なPhotoMomentに対してだけ、新しい短期アップロードURLを発行する。発行回数を制限し、`ready`、`failed`、`deleting`には発行しない。
+`pending`かつ有効なPhotoMomentに対してだけ、新しい短期アップロードURLを発行する。初回を含む発行回数は5回までとし、上限は409、`ready`、`failed`、`deleting`には発行しない。URL再発行と`complete`のbodyは空とする。
 
 ### `POST /v1/memory-sessions/{memorySessionId}/photos/{photoMomentId}/complete`
 
 アップロード完了を通知する。Backendはオブジェクトを検証し、成功時は`ready`、不正形式やEXIF残存時は削除して`failed`にする。同じ`clientPhotoId`、ハッシュ、冪等性キーの再送は同じPhotoMomentを返す。`ready`確定後に量子化済みの`photo.marker.created`を配信し、3件以上の集計だけ`photo.hotspot.updated`を配信する。
+
+Backend #6の保存処理では、不正画像の消去に失敗した場合は`deleting`を永続化し、再試行して消去できてから`failed`へ進める。未アップロードの`complete`は409、成功・再送は同じ`ready`または`failed`状態を200で返す。写真ピン・フォトスポットのイベント配信はBackend #10/#9の実装後とし、写真保存完了だけで配信済みとは扱わない。
 
 ### `DELETE /v1/memory-sessions/{memorySessionId}/photos/{photoMomentId}`
 
 Header: `Idempotency-Key: random-value`
 
 写真オブジェクト、PhotoMoment、派生特徴を削除する。前後のRouteSegmentは残った写真撮影時GPSから再生成し、再生成できない場合は未確定区間にする。個別ピンを消し、対応するフォトスポット集計を減算する。3件未満になれば`photo.hotspot.hidden`を配信する。
+
+写真削除は消去成功後204、消去失敗時は503とし、同じ冪等性キーで再試行できる。先に`deleting`を確定して新規閲覧を止め、オブジェクト消去前にPhotoMomentやMemorySessionを失わない。未失効のPUTが画像を復活させないよう、アップロード先はゼロバイトで占有し、最後のURL期限後にランダムkey・期限だけのoutboxから消去する。画像・撮影時GPS・PhotoMoment参照をこのoutboxへ残さない。現段階では派生特徴・別サムネイル・RouteSegment・ピンを生成しないため、それらの再生成・減算は各機能実装時の契約である。
 
 ## 撮影通知
 
@@ -333,6 +345,8 @@ Header: `Idempotency-Key: random-value`
 ### `GET /v1/memory-sessions/{memorySessionId}/memory`
 
 本人用の写真、写真間の再構成経路、信頼度を時系列に返す。画像取得URLは参加認証後に発行する5分以内の署名付きURLとし、レスポンス・プロキシ・CDNログに参加トークンを含めない。
+
+Backend #6の本人memoryは`ready`写真だけを返し、URL期限は5分とMemorySessionの`deleteAfter`の早い方までとする。`locationConfidence`は撮影時GPSなし/精度100m超を`low`、30m超〜100mを`medium`、30m以下を`high`とする暫定分類で、経路の信頼度とは異なる。Backend #7の経路生成まで`segments`は空配列であり、下の非空例を現行提供済みとは扱わない。
 
 ```json
 {
@@ -389,7 +403,7 @@ Header: `Idempotency-Key: random-value`
 }
 ```
 
-写真件数は写真機能実装後、MemorySessionに紐づくPhotoMomentから算出する。現在のBackendは写真機能を提供せず、`photoSummary`は空の状態（`ready`/`pending`/`failed`が0件、`maxCount`が12）のみ返す。LivePresenceSessionが存在しない場合は`livePresenceSession`を省略する。写真・通知APIはこの例に登場するだけで提供済みとみなさない。
+Backend #6の写真実装では、`photoSummary`の`ready`/`pending`/`failed`をMemorySessionの実件数から算出し、`maxCount`は12とする。`deleting`は一覧から確認し、保持中の上限には含める。LivePresenceSessionが存在しない場合は`livePresenceSession`を省略する。写真機能の有効化・配備は別操作であり、通知・到着キュー等の未実装項目はこの例に登場するだけで提供済みとみなさない。
 
 ## 運営API
 
