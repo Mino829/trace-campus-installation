@@ -1,20 +1,18 @@
 # 配置・展示運用・障害対応
 
-## 推奨配置
+## 採用する配置（技術方針、公開承認前）
 
 ```text
-Vercel
-  Next.js Web App
+Cloudflare サイトWorker
+  Next.js静的Web、/log、/display
+  /api/backend/* -> HTTPSでGoへ中継
           |
-          | HTTPS / WSS
           v
-承認済みクラウドの東京リージョン（いずれか一方）
-  第一候補: Google Cloud
-    Cloud Run / Cloud SQL PostgreSQL / Cloud Storage / Monitoring
-  代替: AWS
-    Go container実行環境 / RDS PostgreSQL / S3 / CloudWatch
-          |
-          | outbound WebSocket
+Google Cloud東京
+  Cloud Run: Go API（最大1インスタンス）
+  Cloud SQL for PostgreSQL 17 / 非公開Cloud Storage / Monitoring
+          ^
+          | 外向きWSS（描画用経路・資格情報は実装前に決定）
           v
 Mac mini M4 または高性能ノートPC
   Unity / TouchDesigner
@@ -32,21 +30,23 @@ Raspberry Pi 4B
   NFC・物理ボタン・LED制御候補
 ```
 
-学内ネットワークから描画PCへの受信ポート開放を要求せず、描画PC側から公開サーバーへ接続する。
+学内ネットワークから描画PCへの受信ポート開放を要求せず、描画PC側から承認済みの公開経路へ接続する。既存サイトWorkerは描画WSSを中継しない。
 
-本番では承認済みクラウド環境のマネージドPostgreSQLだけを正本とし、写真は同じ承認済み地域の非公開オブジェクトストレージへ保存する。MVPからSQLiteを本番正本にせず、Google CloudではCloud SQL for PostgreSQL、AWSではRDS for PostgreSQLを使用する。Goは両環境へ配置できるOCI互換コンテナとし、提供者固有機能への依存を抑える。会場PC上のGo Backendは開発・緊急構成に限り、本番正本と同時書き込みしない。
+本番では東京のCloud SQL for PostgreSQL 17だけを正本とし、写真は同じ東京の非公開Cloud Storageへ保存する方針。Cloudflareを通る通信やログ、調査用D1/KVの東京処理・保存は保証されず、大学の審査と予算承認を終えるまで公開・実データ受付は行わない。GoはOCI互換コンテナとし、AWSへの変更は再決定する。会場PC上のGo Backendは開発・承認済み緊急構成に限り、本番正本と同時書き込みしない。
 
 通常GPSの最新表示位置はPostgreSQLへ履歴保存しない。単一BackendではGoメモリへ30〜60秒TTLで保持し、複数Backend化するときにRedis互換の共有TTLストアへ移す。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
 
 ## 環境・リリース管理
 
-- `local`、`staging`、`production`を分離し、本番参加者データを他環境へコピーしない
-- pull requestごとにVercel Previewを作り、BackendとDB migrationは先にstagingで検証する
+- `local`、`staging`、`production`のWorker、Go、DB、bucket、secret、データを分離し、本番参加者データを他環境へコピーしない。既存の`trace-staging-async5855`と`trace-staging-preview`は検証用であり本番ではない
+- Cloudflareのプレビュー/サイトWorkerでWebを検証し、BackendとDB migrationを先にstagingで検証する。IAM保護中のCloud Run stagingへ共有secretだけで接続できないため、経路確認が済むまでは非公開を維持する
 - productionは`main`へのpushだけで自動公開せず、技術責任者が承認した成果物を昇格する
 - Web、Go container、DB schema、WebSocket schema、CampusGraph、座標変換、3D Mapの版をrelease manifestへまとめる
 - DB migrationは後方互換のあるexpand-contract方式とし、production起動時に破壊的変更を自動実行しない
-- T-1週以降は緊急修正以外を停止し、直前安定版へ戻せるWeb deployment、container image、描画ビルドを保持する
-- Cloud RunまたはAWSのBackend最大インスタンス数と、Goの1インスタンス当たりDB接続上限を同時に設定する
+- T-1週以降は緊急修正以外を停止し、直前安定版へ戻せるWorker配信、container image、描画ビルドを保持する
+- Cloud Run最大1インスタンスとGoのDB接続プール上限を設定し、DBの管理/migration接続枠を残す。新旧revisionの並存にも注意する
+
+独自ドメインはFrontend #30の選定・調達後にCloudflare DNS/TLSへ接続する方針。Cloudflare側のWAFと入口のレート制限、Go側の参加者単位のレート制限を併用し、Worker・Cloud Run・Cloud SQL・bucketの異常を監視する。DNS/TLS・WAF・監視の実作業者および通知先は公開前に技術責任者が記録する（現時点で技術責任者未決）。課金責任者Mino829がドメイン、Cloudflare、Google Cloudの見積もりと5,000円の上限を確認する。予算アラートは強制停止ではない。
 
 ## 機材役割
 

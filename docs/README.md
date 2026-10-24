@@ -31,8 +31,8 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 ## システム
 
 - [システム構成](architecture.md): コンポーネントと責務
-- [インフラ・データベース方針](infrastructure-database-decision.md): Vercel、Google Cloud / AWS、PostgreSQL、環境分離、拡張方針
-- [Cloudflare Web + Google Cloud Backend 配置案](cloudflare-web-backend-option.md): 稼働中のデモを踏まえた未採用の配置比較と、Web・Go間の通信境界
+- [インフラ・データベース方針](infrastructure-database-decision.md): Cloudflare Workers + Google Cloud東京、PostgreSQL、環境分離、公開前の承認
+- [配置比較の記録](cloudflare-web-backend-option.md): Vercel案とCloudflare案の比較履歴、Web・Go間の通信境界
 - [データモデル](data-model.md): 保存データ、関係、削除方針
 - [API・WebSocket仕様](api.md): Webアプリ、Go、描画クライアント間の契約
 - [参加追跡・到着演出の状態遷移](state-machine.md): 写真、リアルタイム位置、会場内フェーズ、到着演出を分離した状態管理
@@ -49,13 +49,13 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 - Web AppはReact / Next.jsを使用する
 - BackendはGoを使用する
 - 描画はUnityまたはTouchDesignerを比較する既存方針にthree.jsを候補として追加し、採用後に構成・描画クライアントの配置を更新する
-- MVPからマネージドPostgreSQLを正本とし、Google CloudではCloud SQL、AWSではRDSを使用する
-- Next.jsはVercel、Go BackendはGoogle Cloud東京を第一候補とし、大学の既存契約・審査によりAWS東京へ切り替えられるコンテナ構成にする
-- 写真本体はDBへ保存せず、非公開のCloud StorageまたはS3へ保存する
-- スマートフォンはHTTPSで公開エンドポイントへ接続する
-- 描画PCは外向きWebSocket接続を使用する
+- MVPから東京のCloud SQL for PostgreSQL 17を正本とする技術方針。大学承認前の本番データ受付は行わない
+- Next.js静的WebはCloudflareサイトWorker、Go BackendはGoogle Cloud東京のCloud Runとし、同一オリジン`/api/backend/*`から中継する。AWS東京への変更は別途再決定する
+- 写真本体はDBへ保存せず、東京の非公開Cloud Storageへ保存する方針
+- スマートフォンはHTTPSでサイトWorkerへ接続する。Cloudflareの転送・ログを含む全処理が東京で行われるとは保証しない
+- 描画PCは外向きWebSocket接続を使用する設計。経路・資格情報は未決であり現行Workerでは未中継
 - 位置取得間隔、精度閾値、同時接続数はキャンパス実地試験で確定する
-- 本番はVercelにWeb App、承認済みクラウド環境にGo Backend、PostgreSQL、非公開写真ストレージを置く。会場PC上のGoは開発・緊急構成に限る
+- 会場PC上のGoは開発・承認済み緊急構成に限る
 - 参加追跡状態と到着演出状態は別々に管理する
 - 写真を記憶の主役、GPSを写真間の経路再構成に使う補助データとする
 - 通常GPSは最新表示だけに使って履歴を保存・再送せず、写真撮影時GPSだけを写真と一緒に再送できる
@@ -71,9 +71,9 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 - データ保存期間
 - TouchDesigner / Unity / three.js の比較と最終選択
 - 3Dキャンパスモデルの制作方法
-- Google CloudまたはAWSの最終選択と大学承認
-- PostgreSQLのversion、可用性構成、instance size、接続上限
-- 写真オブジェクトストレージの提供者、保存地域、削除保証
+- CloudflareとGoogle Cloudの提供者・処理地域に関する大学承認
+- Cloud SQL PostgreSQL 17の可用性、instance size、接続上限とバックアップ/PITR保持
+- 写真の保存期間・削除保証、ドメイン/DNS/TLS・監視責任者、予算内の見積もり
 - キャンパス経路グラフの作成・更新責任者
 - 対応OS・ブラウザの最低バージョン
 - 当日の運営担当と新規調達の要否（予算上限5,000円、企画・課金責任者はMino829）

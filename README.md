@@ -10,9 +10,9 @@
 - Backend: Go
 - Realtime: WebSocket
 - Rendering: Unity または TouchDesigner
-- Deployment: Cloudflare + Google Cloud東京を第一候補、AWS東京を代替
-- Storage: マネージドPostgreSQL（Cloud SQLまたはRDS）
-- Photo Storage: 非公開オブジェクトストレージ（Cloud StorageまたはS3）
+- Deployment: CloudflareサイトWorker + Google Cloud東京（技術構成。大学承認・本番公開は未完了）
+- Storage: Cloud SQL for PostgreSQL 17（東京）
+- Photo Storage: 非公開Cloud Storage（東京）
 - Route Reconstruction: バージョン付きキャンパス経路グラフ / A*またはDijkstra
 - Arrival: QRコード、将来的にNFC
 

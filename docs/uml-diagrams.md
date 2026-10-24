@@ -81,7 +81,7 @@ flowchart LR
 
 ## 配置図
 
-本番のWeb AppはVercel、Go Backend、正本DB、非公開写真bucketは承認済みクラウドの東京リージョンへ配置します。第一候補はGoogle Cloud、大学の既存契約・審査が優先される場合はAWSを代替とします。会場PC上のBackendは開発・承認済み緊急構成に限定し、本番DBと同時に正本として動かしません。
+技術方針はCloudflareサイトWorkerでNext.js静的Webと参加者APIの中継、Google Cloud東京でCloud Run、Cloud SQL for PostgreSQL 17、非公開Cloud Storageを採用します。大学の提供者・処理地域・費用承認と公開経路の検証は未完了です。Cloudflareの処理・ログは東京保存の保証対象ではなく、会場PC上のBackendは開発・承認済み緊急構成に限定します。
 
 ```mermaid
 flowchart TB
@@ -91,15 +91,15 @@ flowchart TB
         MobileBrowser --- MobileStorage
     end
 
-    subgraph Vercel["Vercel"]
-        NextServer["Next.js<br/>参加画面の配信"]
+    subgraph Cloudflare["Cloudflare"]
+        NextServer["サイトWorker<br/>Next.js静的Web / API中継"]
     end
 
-    subgraph PublicEnvironment["Google Cloud東京（第一候補）またはAWS東京"]
-        GoBackend["Go Backend<br/>REST API・WebSocket"]
-        MainDB[("正本DB<br/>マネージドPostgreSQL")]
-        PhotoStore[("非公開写真bucket<br/>Cloud StorageまたはS3")]
-        NextServer --- GoBackend
+    subgraph PublicEnvironment["Google Cloud東京（技術方針、公開承認前）"]
+        GoBackend["Cloud Run<br/>Go REST API・WebSocket"]
+        MainDB[("正本DB<br/>Cloud SQL PostgreSQL 17")]
+        PhotoStore[("非公開写真bucket<br/>Cloud Storage")]
+        NextServer -->|"許可されたAPI + edge secret"| GoBackend
         GoBackend --- MainDB
         GoBackend --- PhotoStore
     end
@@ -124,7 +124,7 @@ flowchart TB
     end
 
     MobileBrowser -->|"HTTPS：画面取得"| NextServer
-    MobileBrowser -->|"HTTPS：同意・位置・到着・停止・削除"| GoBackend
+    MobileBrowser -->|"HTTPS：同一オリジン /api/backend/*"| NextServer
     Dashboard -->|"HTTPS：監視・運営操作"| GoBackend
     Renderer <-->|"WSS：描画PCから外向き接続"| GoBackend
     StandbyRenderer <-->|"WSS：待機接続"| GoBackend
@@ -137,11 +137,11 @@ flowchart TB
 
 ### 配置上のポイント
 
-- スマートフォンと描画PCは、どちらも公開環境へ外向きに接続する
+- スマートフォンはCloudflareサイトWorkerの同一オリジンAPIへ外向き接続する。描画WSSの経路・認証は未確定で現行Workerの中継対象外
 - 学内ネットワークから描画PCへの受信ポート開放を前提としない
-- MVPからマネージドPostgreSQLを正本とし、Google CloudではCloud SQL、AWSではRDSを使用する
+- Cloud SQL PostgreSQL 17と非公開Cloud Storageを東京の正本にする。大学承認・予算承認まで実データ受付を行わない
 - 通常GPSの最新表示位置はPostgreSQLへ履歴保存せず、単一BackendではGoメモリ、複数BackendではRedis互換TTLストアへ置く
-- Go BackendはOCI互換コンテナとしてGCP / AWS間の移植性を保つ
+- Go BackendはOCI互換コンテナとする。AWS等への変更は別途決定する
 - 主描画PC停止時はバックアップ描画または合成映像へ切り替える
 
 ## コンポーネント図
@@ -231,13 +231,15 @@ flowchart LR
 
 ### 通常参加から到着演出まで
 
+以下のブラウザ↔Go間のAPI矢印は業務フローの省略表現。実通信はすべてブラウザ→CloudflareサイトWorkerの同一オリジン`/api/backend/*`→Goであり、Workerがedge secretを付与する。描画WSSの経路は別途未決。
+
 ```mermaid
 sequenceDiagram
     autonumber
     actor User as 参加者
     participant Browser as スマートフォン<br/>Next.js Web App
-    participant Front as Vercel<br/>Next.js
-    participant API as Go Backend
+    participant Front as Cloudflare<br/>サイトWorker
+    participant API as Go Backend<br/>（参加者APIはWorker経由）
     participant DB as 正本DB
     participant Renderer as 描画PC<br/>Unity / TouchDesigner
     participant Output as プロジェクター<br/>音響・照明
@@ -251,11 +253,11 @@ sequenceDiagram
     User->>Browser: 入口の参加QRを読み取る
     Browser->>Front: 参加ページを取得（HTTPS）
     Front-->>Browser: Web Appを配信
-    Browser->>API: GET /v1/public/config
+    Browser->>API: GET /v1/public/config（Worker中継）
     API-->>Browser: 受付状態・同意文・保存期間・取得間隔
     Browser-->>User: 目的・取得項目・停止・削除方法を表示
     User->>Browser: 内容に同意して開始
-    Browser->>API: POST /v1/experiences<br/>写真・リアルタイムの同意版と言語
+    Browser->>API: POST /v1/experiences（Worker中継）<br/>写真・リアルタイムの同意版と言語
     API->>DB: MemorySessionとLivePresenceSessionを別保存<br/>短期ExperienceLinkを作成
     DB-->>API: 保存完了
     API-->>Browser: 201 各sessionId・各トークン・alias・期限
@@ -432,8 +434,8 @@ sequenceDiagram
 | 未来時刻の位置点 | 図では「入力検証」とだけ記載し、処理を確定していない | `FUTURE_TIME`として拒否するか、受信時刻へ補正するか。API仕様と座標変換資料で記述が異なる |
 | 描画へ渡す誤差情報 | 図では「不確実性」と表記している | `accuracyM`と`uncertaintyM`のどちらを正式名称にするか、生の精度か加工後の値か |
 | 到着後のリアルタイム位置 | `arrived`で停止か追加同意による`on_site`を選ぶ | on_siteの点・エリア・操作時表示の採用基準 |
-| クラウド提供者 | Vercel + Google Cloud東京を第一候補、AWS東京を代替とする | 大学の既存契約、保存地域、個人情報審査に基づく最終承認 |
-| PostgreSQL構成 | MVPからCloud SQLまたはRDSのマネージドPostgreSQLを正本とする | version、可用性、instance size、接続上限、バックアップ保持期間 |
+| クラウド提供者 | CloudflareサイトWorker + Google Cloud東京（Cloud Run / Cloud SQL PostgreSQL 17 / 非公開Cloud Storage）を技術方針として採用 | 大学の提供者・処理地域・個人情報承認と費用/公開経路の確認。Cloudflare側の東京処理は保証しない |
+| PostgreSQL構成 | Cloud SQL for PostgreSQL 17を正本とする | 可用性、instance size、接続上限、7日上限のバックアップ/PITRと削除保証 |
 | 描画ソフト | 図はUnityまたはTouchDesignerの既存案。three.jsも比較候補だが未採用 | 最終方式と描画クライアントの配置先・通信契約を決める。実作業担当はcode-yuto |
 | Raspberry Pi・音響・照明 | 候補または任意接続として点線で表している | MVPに含める範囲、接続方式、障害時に切り離せる条件 |
 
