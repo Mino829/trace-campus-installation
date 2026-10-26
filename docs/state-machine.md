@@ -16,9 +16,8 @@
 stateDiagram-v2
     [*] --> main: session created (consent accepted)
     main --> arrived: signed and expiring QR verified
-    arrived --> ended: replay finished or session closed
-    main --> ended: expires_at reached
     arrived --> ended: expires_at reached
+    main --> ended: expires_at reached
     ended --> [*]: deleteAfter reached, data deleted
 ```
 
@@ -26,7 +25,7 @@ stateDiagram-v2
 |---|---|---:|
 | `main` | 同意済みで体験中。写真撮影・地点申告・到着待ち | Yes |
 | `arrived` | 到着証明を検証済み。撮影通知を停止 | 写真登録は可（失効前） |
-| `ended` | 再生完了または失効。完了状態・削除予定日時・ストーリー保存の表示のみ | No |
+| `ended` | 失効。完了状態・削除予定日時・ストーリー保存の表示のみ | No |
 
 | 現在 | イベント | 次 | サーバー処理 |
 |---|---|---|---|
@@ -51,7 +50,8 @@ stateDiagram-v2
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued: arrival accepted
+    [*] --> Queued: arrival accepted, capacity available
+    [*] --> Skipped: arrival accepted, queue full
     Queued --> Playing: primary renderer starts
     Queued --> Skipped: participant, timeout, operator
     Playing --> Completed: primary renderer completes
@@ -74,6 +74,7 @@ stateDiagram-v2
 | `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
 | `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
+待機中の`queued`は最大10件、先入れ先出しとする。到着受付のサーバー時刻から30秒以内に主描画機が再生開始を確定しなければ`timeout`で`skipped`にする。写真`pending`の待機はこの上限内に含める。満杯でも到着イベントとセッションの`arrived`は確定し、`queue_full`で直ちに`skipped`とする。キューの枠判定と到着イベント登録は原子的に行い、同じセッションの再送は既存イベントを返す。`skipped`と`completed`を再登録せず、描画機の再接続でも演出を自動再開しない。
 
 再生データはグラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻である。経路は写真を撮った順に各写真の地点をCampusGraph最短経路でつなぎ、最後の写真からShibaLab（到着）までの区間も同じ線で描く。再生は全体10〜20秒、区間の長さに比例配分、写真地点で少し停止する。
 
@@ -81,7 +82,7 @@ stateDiagram-v2
 
 ## 冪等性・競合制御
 
-- 到着済みセッションへの到着要求は既存のArrivalEventを返す
+- 到着済みセッションへの本人認証済み再送はQRの期限に関わらず既存のArrivalEventを返す。投影QRの同一値は複数セッションで読めるため、証明そのものの一回限りの使用は保証しない
 - 描画機からの同じ`eventId`は一度だけ適用する
 - 到着作成はArrivalEvent作成と`status=arrived`更新を一つのDBトランザクションで行う
 - 演出開始は主描画機リースを持つ一台だけが確定できる
@@ -94,8 +95,8 @@ stateDiagram-v2
 
 ## 異常系
 
-- 描画機が接続されていない場合も到着を受け付け、上限内でキューへ保持する
-- 設定時間内に再生を開始できなければ`skipped`とし、通常展示を継続する
+- 描画機が接続されていない場合も到着を受け付け、待機10件以内で保持する。満杯時は到着だけを成立させ演出を`queue_full`でskipする
+- 到着受付から30秒以内に再生を開始できなければ`timeout`で`skipped`とし、通常展示を継続する
 - 端末時刻が不正でも、到着はサーバー受信時刻とQRの署名・有効期限を正とする
-- 主描画機が再生中に切断した場合は、同じ演出を自動で別端末から再開せず、skipまたは運営承認付き再試行とする
+- 主描画機が再生中に切断した場合は演出を`skipped`にし、同じ到着を別端末で自動再開しない
 - 参加者が再生前に削除した場合はキューから除外し、描画機へ停止イベントを送る

@@ -62,6 +62,7 @@ erDiagram
         string source
         string checkpoint_id
         string replay_status
+        string skip_reason
         datetime arrived_at
         datetime replay_started_at
         datetime replay_finished_at
@@ -188,12 +189,12 @@ erDiagram
 
 ## ArrivalEvent
 
-到着はセッションにつき最大1件とする。二重送信は同じ結果を返す。
+到着はセッションにつき最大1件とする。同じMemorySessionからの本人認証済み再送はQRの期限後も同じArrivalEventと現在の再生状態を返す。
 
-- `source`: `qr`、`operator`
+- `source`: `qr`。到着は有効な展示ブースQRでのみ成立する
 - `replay_status`: `queued`、`playing`、`completed`、`skipped`
 - `checkpoint_id`: 到着場所（ShibaLab）の識別子。署名付き証明そのものは保存しない
-- `skip_reason`: `participant_request`、`timeout`、`renderer_failure`、`operator`
+- `skip_reason`: `queue_full`、`timeout`、`participant_request`、`renderer_failure`、`operator`。待機キューは最大10件、到着から30秒以内に開始できない場合はskipする
 
 到着は展示ブースで投影・定期更新する署名・期限付きQRのBackend検証でのみ成立する（2026-10-26決定、#11）。受付ではMemorySessionへArrivalEventを作成し、`status`を`arrived`へ変更して撮影通知を停止する。写真0枚・1枚でも到着は成立する（2026-10-26決定、#23）。再生状態はArrivalEventだけを正とし、MemorySessionへ`replaying`を重複保存しない。
 
