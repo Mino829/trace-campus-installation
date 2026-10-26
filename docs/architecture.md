@@ -30,7 +30,7 @@ Frontend リポジトリ /display（three.js）
 
 本番構成の技術方針はNext.jsの静的書き出しをCloudflareのサイトWorkerで配信し、Go BackendをCloud Run、正本DBをCloud SQL for PostgreSQL 17に置く。新規写真はスマートフォンのブラウザ内（IndexedDB等）に保存し、新規Cloud Storageオブジェクトは作らない設計目標。旧方式でCloud Storageに保存済みの写真は非公開のまま既定の`deleteAfter`まで保持し、本人資格での照会・削除と期限削除を継続する。大学の提供者・保存/処理地域と費用の承認は未完了。AWS等への変更は別途決定する。
 
-参加者端末から同一オリジンの`/api/backend/*`を通じてGoへ送る新規写真関連データは、写真ID・撮影時刻・`checkpointId`等の経路用メタデータだけとし、画像バイト列・画像URLは送らない設計目標。従来のGo発行署名URLによるCloud Storageへの直接PUTは新規写真に用いず、旧写真の本人照会に必要な認証付き取得経路だけを維持する。新規方式のFrontend/Backendは未実装であり、旧方式の本人操作・期限清掃を無断で停止しない。描画PCはthree.jsの`/display`クライアントからGo（Cloud Run）へ外向きWSS接続する方針だが、認証・公開経路は未確定である。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。描画機へ写真原画像や画像URLを送らない。配置・WSSの未決事項はこの写真方式の変更で確定させず、詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を参照する。
+参加者端末は同一オリジンの`/api/backend/*`を通じてGoへ写真ID・撮影時刻・`checkpointId`等の経路用メタデータだけを送る設計目標。画像バイト列・画像URLは送らず、従来の署名URLによるCloud Storageへの直接PUTは新規写真に用いない。新規方式のFrontend/Backend・Workerの`/v2`許可リストは未実装・未検証であり、旧クラウド写真の本人閲覧・削除と各`deleteAfter`での清掃は維持する。描画PCではFrontendリポジトリのthree.js `/display`を運用し、Go（Cloud Run）へ外向きWSS接続する。サイトWorkerはWSSを中継せず、ブラウザ自身がGoへ直接接続することまでは決定していない。[TRACE_F PR #46](https://github.com/Mino829/TRACE_F/pull/46) は展示PCの`arrival-issuer`によるローカル中継とブラウザ外での描画資格保持を提案・実装中だが、資格発行経路・運営API入口は[Issue #11](https://github.com/Mino829/trace-campus-installation/issues/11)で未決。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。写真原画像や画像URLは描画機へ送らない。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を参照する。
 
 ## データ配置
 
@@ -89,10 +89,10 @@ MVPではGo Backendを単一の主インスタンスとして開始し、セッ�
 
 ## 描画
 
-- Frontendリポジトリの`/display`をthree.jsで実装し、主描画PCのプロジェクターへ投影する
-- Goへ外向きWSS接続し、グラフ（CampusGraph）の点ID列・グラフ版・写真ごとの点IDと撮影時刻を受信する
-- 3D座標への対応付けは3D Map設定から描画クライアントが行う
-- 接続断時はスナップショットから復元する
+- Frontendリポジトリの`/display`をthree.jsで実装し、主描画PCのプロジェクターへ投影する（担当code-yuto）。Blender原本・Graph JSON・展示用GLBと原点/軸/単位の実体、および公開互換版の未確認部分は[座標・Graph仕様](coordinate-mapping.md)に記す
+- 描画PCからGoへの外向きWSSでグラフの点ID列・グラフ版・写真ごとの点IDと撮影時刻を受け取る設計。ブラウザとGo間の資格情報の扱いと中継境界は未確定
+- 3D座標への対応付けは3D Map設定から描画クライアントが行う設計
+- 接続断時はスナップショットから復元する設計。認証・版照合・削除反映を含む統合は[TRACE_B#9](https://github.com/Mino829/TRACE_B/issues/9)・[TRACE_F#36](https://github.com/Mino829/TRACE_F/issues/36)の対象で、実データの通し確認は未実施
 
 ## 主要イベント
 
