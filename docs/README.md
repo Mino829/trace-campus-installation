@@ -48,12 +48,12 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 
 - Web AppはReact / Next.jsを使用する
 - BackendはGoを使用する
-- 描画はUnityまたはTouchDesignerを比較する既存方針にthree.jsを候補として追加し、採用後に構成・描画クライアントの配置を更新する
+- 描画はthree.jsを採用した（2026-10-26、Issue #12）
 - MVPから東京のCloud SQL for PostgreSQL 17を正本とする技術方針。大学承認前の本番データ受付は行わない
 - Next.js静的WebはCloudflareサイトWorker、Go BackendはGoogle Cloud東京のCloud Runとし、同一オリジン`/api/backend/*`から中継する。AWS東京への変更は別途再決定する
 - 写真本体はDBへ保存せず、東京の非公開Cloud Storageへ保存する方針
 - スマートフォンはHTTPSでサイトWorkerへ接続する。Cloudflareの転送・ログを含む全処理が東京で行われるとは保証しない
-- 描画PCは外向きWebSocket接続を使用する設計。経路・資格情報は未決であり現行Workerでは未中継
+- 描画PCは外向きWebSocketでGo（Cloud Run）へ直接接続する（2026-10-26決定）。Workerは中継せず、描画用資格情報の発行契約はIssue #11で整備する
 - 位置取得間隔、精度閾値、同時接続数はキャンパス実地試験で確定する
 - 会場PC上のGoは開発・承認済み緊急構成に限る
 - 参加追跡状態と到着演出状態は別々に管理する
@@ -69,7 +69,6 @@ TRACE MVPの仕様と設計判断をまとめる。実装中に仕様を変更�
 - 本番の最大同時参加人数（試験後にIssue #15で決定。予測参加人数50人/日、希望値100人/日とは別）
 - 大学の位置情報利用・ネットワーク利用許可
 - データ保存期間
-- TouchDesigner / Unity / three.js の比較と最終選択
 - 3Dキャンパスモデルの制作方法
 - CloudflareとGoogle Cloudの提供者・処理地域に関する大学承認
 - Cloud SQL PostgreSQL 17の可用性、instance size、接続上限とバックアップ/PITR保持

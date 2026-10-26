@@ -46,7 +46,7 @@ Raspberry Pi 4B
 - T-1週以降は緊急修正以外を停止し、直前安定版へ戻せるWorker配信、container image、描画ビルドを保持する
 - Cloud Run最大1インスタンスとGoのDB接続プール上限を設定し、DBの管理/migration接続枠を残す。新旧revisionの並存にも注意する
 
-独自ドメインはFrontend #30の選定・調達後にCloudflare DNS/TLSへ接続する方針。Cloudflare側のWAFと入口のレート制限、Go側の参加者単位のレート制限を併用し、Worker・Cloud Run・Cloud SQL・bucketの異常を監視する。DNS/TLS・WAF・監視の実作業者および通知先は公開前に技術責任者が記録する（現時点で技術責任者未決）。課金責任者Mino829がドメイン、Cloudflare、Google Cloudの見積もりと5,000円の上限を確認する。予算アラートは強制停止ではない。
+独自ドメインはFrontend #30の選定・調達後にCloudflare DNS/TLSへ接続する方針。Cloudflare側のWAFと入口のレート制限、Go側の参加者単位のレート制限を併用し、Worker・Cloud Run・Cloud SQL・bucketの異常を監視する。DNS/TLS・WAF・監視の実作業者および通知先は公開前に技術責任者が記録する（技術責任者はMino829。2026-10-26に企画・課金責任者との兼務で決定）。課金責任者Mino829がドメイン、Cloudflare、Google Cloudの見積もりと5,000円の上限を確認する。予算アラートは強制停止ではない。
 
 ## 機材役割
 

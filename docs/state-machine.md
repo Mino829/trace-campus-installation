@@ -52,7 +52,7 @@ stateDiagram-v2
 - `on_site`: 用途・粒度を示した追加同意後。原則エリア表示とし、精度不足時は操作時だけの表示へ落とす
 - `ended`: 表示終了。最新位置を削除する
 
-ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`は有効な到着処理で`arrived`になったセッションからだけ進める。到着QRの受付だけでは移行せず、会場内用途・表示粒度を示した本人の明示的な追加同意版を必須にする。到着証明の具体的な仕組みはIssue #11で未決定。
+ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`は有効な到着処理で`arrived`になったセッションからだけ進める。到着QRの受付だけでは移行せず、会場内用途・表示粒度を示した本人の明示的な追加同意版を必須にする。到着証明の具体的な仕組みは、展示ブースで投影する署名・期限付きQRのBackend検証とする（2026-10-26決定、Issue #11）。
 
 ## 写真状態
 

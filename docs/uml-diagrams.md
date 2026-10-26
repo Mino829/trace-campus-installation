@@ -231,7 +231,7 @@ flowchart LR
 
 ### 通常参加から到着演出まで
 
-以下のブラウザ↔Go間のAPI矢印は業務フローの省略表現。実通信はすべてブラウザ→CloudflareサイトWorkerの同一オリジン`/api/backend/*`→Goであり、Workerがedge secretを付与する。描画WSSの経路は別途未決。
+以下のブラウザ↔Go間のAPI矢印は業務フローの省略表現。実通信はすべてブラウザ→CloudflareサイトWorkerの同一オリジン`/api/backend/*`→Goであり、Workerがedge secretを付与する。描画WSSは描画PCからGo（Cloud Run）への外向きWebSocket直接接続とする（2026-10-26決定）。Workerは中継せず、描画用資格情報の発行契約はIssue #11で整備する。
 
 ```mermaid
 sequenceDiagram
