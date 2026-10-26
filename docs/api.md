@@ -1,10 +1,10 @@
 # API・WebSocket仕様
 
-この文書は実装目標の契約を含む設計仕様であり、全APIが現行Backendで提供済みであることを示さない。2026-10-26にGPS不使用・写真地点自己申告仕様へ移行した（Issue #23）。位置情報（GPS）は一切使わず、写真地点は参加者が3Dマップで選んだ`checkpointId`のみで表す。到着証明は展示ブースで投影する署名・期限付きQRとする（2026-10-26決定、Issue #11）。大学のプライバシー審査（#9）は未完了。
+この文書は設計目標を含み、現行Backendで全APIが提供済みであることを示さない。2026-10-26にGPS不使用・写真地点自己申告へ移行した（#23）。追加方針として写真の画像バイト列は参加端末内だけに保持し、Backendへは写真ID・`checkpointId`・撮影時刻など経路に必要なメタデータだけを送る。既存Backendの写真オブジェクト保存契約は移行前の実装であり、移行・新同意文の承認・旧写真の削除保証が済むまで新方式の実データ受付を開始しない。到着証明は展示ブースで投影する署名・期限付きQRとする（#11）。大学のプライバシー審査（#9）は未完了。
 
 ## 共通方針
 
-- Base path: `/v1`
+- Base path: 既存セッション・到着・旧写真契約は`/v1`。画像を送らない破壊的な写真契約は`/v2`とし、旧写真の本人照会・削除は旧セッションの`deleteAfter`まで維持する
 - 形式: `application/json`
 - 時刻: UTCのISO 8601
 - 参加者認証: セッション作成時に発行するBearer token
@@ -26,7 +26,7 @@
 | セッション作成 | 1 IPあたり60回/分、全体10回/秒 |
 | 到着・削除 | 1セッションあたり30回/分 |
 | 写真メタデータ作成 | 1セッション12件、1分6回、JSON 16KB |
-| 写真アップロード | 1枚5MB、許可形式JPEG/WebP、長辺1920px以下 |
+| 端末内の写真 | 暫定で1セッション12枚、合計30MB、1枚5MB、JPEG/WebP、長辺1920px以下。画像バイト列はAPIへ送らない |
 | Push購読・設定 | 1セッションあたり10回/分、JSON 16KB |
 | 描画WebSocket受信 | 1接続あたり10メッセージ/秒、各256KB |
 | 運営API | 1操作者あたり60回/分 |
@@ -41,11 +41,11 @@
 
 ### `GET /v1/public/config`
 
-認証前に、受付状態、対応言語、有効な同意文、保存期間、写真機能情報を返す。クライアントへ同意文を埋め込んだままにせず、サーバーが有効版を決める。
+認証前に受付状態、対応言語、有効な同意文、保存期間、写真機能情報を返す。次の例は旧クラウド写真契約に対応する開発側の草案であり、新しい端末限定保存の有効な同意文・受付設定ではない。/logのローカル同意文とBackend配信本文・版の不一致、および正本の決定は#9/#23で保留中。承認とFrontend/Backendの実装整合まで`registrationOpen=false`とする。
 
 ```json
 {
-  "registrationOpen": true,
+  "registrationOpen": false,
   "consent": {
     "version": "2026-memory-photo-no-gps-draft-1",
     "language": "ja",
@@ -57,7 +57,7 @@
     "threeDMapVersion": "map-2026-01"
   },
   "photo": {
-    "enabled": true,
+    "enabled": false,
     "maxCount": 12,
     "maxUploadBytes": 5242880,
     "maxLongEdgePixels": 1920,
@@ -72,7 +72,7 @@
 }
 ```
 
-同意文は版`2026-memory-photo-no-gps-draft-1`（jaのみ。enは大学審査後に追加）で、位置情報の項目を含まない。参加条件はカメラ許可のみで、到着QRの読み取りに使う（2026-10-26決定、#23）。`notification`は撮影リマインダー30分間隔のみを表す。現行Go APIの公開設定が位置参加・会場内同意・位置TTL等を返す形から、上記の形へ移行する契約であり、現行レスポンスが上記と同一であることを示さない。
+既存同意候補`2026-memory-photo-no-gps-draft-1`（jaのみ）は写真のサーバー保存を前提とするため、新方式で再利用しない。新方式では同意文の正本・版・本文、端末内写真の消失とサーバー側メタデータの保持・削除を#9で承認してから配信する。新規の`photo`設定は`storageMode: "device"`、`maxLocalBytes`を通知し、アップロードURLや`maxUploadBytes`を返さない。上の旧例や現行Go APIを新契約の提供済みレスポンスと扱わない。`notification`は撮影リマインダー30分間隔のみを表す。
 
 ## エラー形式
 
@@ -114,7 +114,7 @@
 
 単一の`MemorySession`を発行する。`enableLivePresence`、`livePresenceConsentVersion`、`experienceLinkToken`、レスポンスの`livePresenceSession`は廃止した（2026-10-26決定、#23）。`participantToken`はレスポンス時だけ返し、サーバーにはハッシュを保存する。有効な同意文と異なる版は`409 CONSENT_VERSION_MISMATCH`として拒否する。
 
-`expiresAt`は開発側既定で失効まで6時間、`deleteAfter`は失効後24時間とする。例示日時と保持期間は大学のプライバシー審査（#9）による決定値ではない。`expiresAt`以後は写真登録などの新規操作を拒否するが、本人の状態取得・閲覧と削除は`deleteAfter`まで利用できる。`deleteAfter`到達時に写真・チェックポイント地点・経路・削除冪等性記録を一緒に期限削除する。
+`expiresAt`は開発側既定で失効まで6時間、`deleteAfter`は失効後24時間とする。例示日時と保持期間は大学のプライバシー審査（#9）による決定値ではない。`expiresAt`以後は写真メタデータの新規登録などを拒否するが、本人の状態取得・閲覧と削除は`deleteAfter`まで利用できる。`deleteAfter`到達時にサーバーの写真メタデータ・チェックポイント地点・経路・削除冪等性記録を一緒に期限削除する。端末内写真は別の保存領域であり、端末を開かない間の即時削除はサーバーから保証できない。
 
 ## 位置送信・会場内表示・追跡停止（廃止契約）
 
@@ -152,7 +152,7 @@ Backendは本人Bearerと有効なMemorySessionを確認し、サーバー時刻
 
 Header: `Idempotency-Key: random-value`
 
-Memory用トークンで認証し、写真、チェックポイント地点、経路、到着イベント、Push購読、削除冪等性記録、MemorySessionのトークンハッシュを削除する。削除は消去成功後204、消去失敗時は503とし、同じ冪等性キーで再試行できる。写真・チェックポイント地点・経路・削除冪等性記録は同一期間で一緒に消す（2026-10-26決定、#23）。写真オブジェクト削除の確認とインフラログ・バックアップの扱いは[プライバシー設計](privacy.md)に従う。
+Memory用トークンで認証し、サーバーの写真メタデータ・チェックポイント地点・経路・到着イベント・Push購読・削除冪等性記録・トークンハッシュを消す。旧方式の写真オブジェクトが残る既存セッションでは先にオブジェクトの消去を確認する。消去成功後204、失敗時503で同じキーを再送できる。新方式の端末内画像はBackendが消せないため、Web Appが同じ参加のローカル画像も削除し、双方の結果を別々に示して失敗時に再試行する。Backendの204を端末内画像の消去完了と表示しない。期限到来時の端末内画像は次回起動時に清掃するが、アプリを開かない間や端末への明示的な書き出し先の削除は保証しない（[プライバシー設計](privacy.md)）。
 
 ### `DELETE /v1/live-presence-sessions/{liveSessionId}`（廃止契約）
 
@@ -176,69 +176,49 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`X-Trace-Live-Toke
 
 成功または部分成功をHTTP `200`で返す。Live側を先に削除・削除記録と一緒に確定し、続いてMemory側を別トランザクションで削除する。Live削除後にMemory削除が失敗した場合は`memory: "pending"`、`live: "deleted"`、`complete: false`を返す。一方の失敗で完了側を復活させない。`pending`や通信失敗の場合、端末は両方の資格情報と同じ冪等性キーを保持して同じリクエストを再送する。完了済み側は24時間の削除記録から結果を再現し、未完了側だけを再試行する。両方が`deleted`の場合だけ`complete: true`を返す。
 
-## 写真撮影・保存
+## 写真の端末保存とメタデータ（新契約、未実装）
 
-ブラウザで向き補正、EXIF除去、縮小、再エンコードを行った後、非公開オブジェクトストレージへアップロードする。Backendは申告値だけを信用せず、保存後に形式、寸法、容量、EXIF不在、ハッシュを検証して`ready`へ変更する。撮影時GPSは取得しない。写真地点は参加者が3Dマップで選んだ`checkpointId`のみである（2026-10-26決定、#23）。
+参加者のWeb Appは撮影画像の向き補正・EXIF除去・縮小・再エンコードを端末内で行い、同じブラウザのIndexedDBに保持する。画像Blob、ハッシュ、寸法・画像URLはBackendへ送らない。写真を端末へ保存できない場合は写真の登録を完了したと表示せず、容量・権限の確認または保存失敗を案内する。Backendへ送るのは匿名セッションに属する写真ID・`checkpointId`・撮影時刻だけである。現行Backendのクラウド写真APIはこの新契約の実装ではない。
 
-Backend Issue #6の以下の記述は対応PR適用後の契約であり、mainへの反映・配備済みを示さない。非公開Cloud Storageを明示設定した場合だけ新規写真を有効にし、既定では無効とする。大学承認・実データ利用の許可を意味しない。経路は別Issueであり、経路の記述は引き続き実装目標を含む。
+### `GET /v2/memory-sessions/{memorySessionId}/photos`
 
-### `GET /v1/memory-sessions/{memorySessionId}/photos`
+本人Bearerで撮影時刻順に`photoMomentId`、`clientPhotoId`、`checkpointId`、`capturedAt`、`sequenceNo`を返す。画像や画像URL、端末内写真の存在・消失はBackendから判定できない。Web Appは同じ端末のIndexedDBで`clientPhotoId`と画像を照合し、画像が失われていれば「この端末に写真がありません」と示す。別ブラウザ・別端末では画像を復元できない。
 
-再読込・再接続時にPhotoMomentのID、`clientPhotoId`、`checkpointId`、撮影時刻、受付順の`sequenceNo`、`pending`、`ready`、`failed`、`deleting`状態を撮影時刻順に返す。画像URLは返さない。期限切れの`pending`には新しいアップロードURLを要求できるが、端末内に対応する加工済み写真がない場合は再アップロード不能として削除を案内する。
+### `POST /v2/memory-sessions/{memorySessionId}/photos`
 
-### `POST /v1/memory-sessions/{memorySessionId}/photos`
-
-Header: `Idempotency-Key: random-value`
+Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: random-value`
 
 ```json
 {
   "clientPhotoId": "client-generated-id",
   "checkpointId": "checkpoint-main-plaza",
-  "capturedAt": "2026-07-13T12:05:00Z",
-  "mimeType": "image/jpeg",
-  "sizeBytes": 820000,
-  "width": 1440,
-  "height": 1920,
-  "sha256": "hex-encoded-hash"
+  "capturedAt": "2026-07-13T12:05:00Z"
 }
 ```
 
-`checkpointId`は必須である。参加者が3Dマップで地点を選ばずに写真を送ることはできず、未選択・無効な地点は`400 INVALID_CHECKPOINT`で拒否する（現行実装準拠、TRACE_F#45）。`checkpointId`が有効であるかは、セッション作成時に返した`campusGraphVersion`のチェックポイント一覧で検証する。成功時に短時間の一回限りアップロードURLを返す。
+`checkpointId`は必須とし、セッション作成時に固定した`campusGraphVersion`でBackendが検証する。未選択・無効な地点は`400 INVALID_CHECKPOINT`。同じセッションの`clientPhotoId`と同内容の再送は同じPhotoMomentを返し、異なる内容は409、削除済みIDの再送は404として復活させない。端末は加工済み画像のローカル保存後にメタデータを送信する。オフラインならメタデータだけを端末内で再送待ちにし、`expiresAt`まで同じIDで再送する。期限切れで未送信ならサーバーの経路に現れず、画像を端末から保存または削除できるよう案内する。
 
 ```json
 {
   "photoMomentId": "photo-moment-id",
-  "status": "pending",
-  "uploadUrl": "short-lived-private-upload-url",
-  "uploadHeaders": {
-    "Content-Type": "image/jpeg",
-    "Content-Length": "820000",
-    "x-goog-if-generation-match": "0",
-    "Cache-Control": "private, no-store, max-age=0"
-  },
-  "uploadExpiresAt": "2026-07-13T12:10:00Z"
+  "clientPhotoId": "client-generated-id",
+  "checkpointId": "checkpoint-main-plaza",
+  "capturedAt": "2026-07-13T12:05:00Z",
+  "sequenceNo": 1
 }
 ```
 
-クライアントは`uploadHeaders`を使用して申告したサイズの画像だけを`PUT uploadUrl`で送る。ブラウザの`Content-Length`はBlobサイズから自動設定し、その他の返却ヘッダーは変更しない。URLの期限は5分とMemorySessionの`expiresAt`の早い方までとし、新規作成専用のgeneration条件で上書きを禁止する。読み取り・一覧取得には使えない。同じ登録要求は同じPhotoMomentへ集約し、内容が異なる再送は409、削除済み写真の同じ登録再送は404とする。登録再送時にURL期限が切れていれば`uploadUrl`を省略し、次の再発行APIを使用する。
+Backendの成功応答はメタデータ登録と経路への反映を示すのみで、画像の保存・内容・EXIF除去・ローカル削除を検証した証明ではない。新規写真の署名付きPUT・GET URL、画像完了通知、サーバー画像検査は提供しない。
 
-### `POST /v1/memory-sessions/{memorySessionId}/photos/{photoMomentId}/upload-url`
+### `DELETE /v2/memory-sessions/{memorySessionId}/photos/{photoMomentId}`
 
-`pending`かつ有効なPhotoMomentに対してだけ、新しい短期アップロードURLを発行する。初回を含む発行回数は5回までとし、上限は409、`ready`、`failed`、`deleting`には発行しない。URL再発行と`complete`のbodyは空とする。
+Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: random-value`
 
-### `POST /v1/memory-sessions/{memorySessionId}/photos/{photoMomentId}/complete`
+本人資格でサーバーのPhotoMoment・チェックポイント地点・経路参照を削除し、残った地点から区間を再生成する。サーバーでの削除成功後204を返す。Web Appは対応する端末内画像も消すが、片側の失敗を完了として隠さず再試行を案内する。サーバーから端末内画像の消去は確認できない。
 
-アップロード完了を通知する。Backendはオブジェクトを検証し、成功時は`ready`、不正形式やEXIF残存時は削除して`failed`にする。同じ`clientPhotoId`、ハッシュ、冪等性キーの再送は同じPhotoMomentを返す。写真ピン・フォトスポットの集計は廃止したため、配信イベントは行わない（2026-10-26決定、#23）。
+### 旧`/v1`写真契約の移行
 
-Backend #6の保存処理では、不正画像の消去に失敗した場合は`deleting`を永続化し、再試行して消去できてから`failed`へ進める。未アップロードの`complete`は409、成功・再送は同じ`ready`または`failed`状態を200で返す。
-
-### `DELETE /v1/memory-sessions/{memorySessionId}/photos/{photoMomentId}`
-
-Header: `Idempotency-Key: random-value`
-
-写真オブジェクト、PhotoMomentを削除する。前後のRouteSegmentは残った写真のチェックポイント地点から再生成し、再生成できない場合は未確定区間にする。
-
-写真削除は消去成功後204、消去失敗時は503とし、同じ冪等性キーで再試行できる。先に`deleting`を確定して新規閲覧を止め、オブジェクト消去前にPhotoMomentやMemorySessionを失わない。未失効のPUTが画像を復活させないよう、アップロード先はゼロバイトで占有し、最後のURL期限後にランダムkey・期限だけのoutboxから消去する。画像・PhotoMoment参照をこのoutboxへ残さない。派生特徴・別サムネイルを生成しないため、それらの再生成は各機能実装時の契約である。
+旧`/v1/memory-sessions/{memorySessionId}/photos`の一覧・単体削除と`/v1/.../memory`の本人画像取得は、クラウド写真を既に持つ旧セッションに対し各`deleteAfter`まで残す。旧方式の新規受付、署名URL発行・再発行・`complete`は移行時に停止する。移行時に進行中のアップロードを消去確認なしに放置せず、既発行URLの失効、pending写真と旧オブジェクトの削除確認を行う。旧写真を前倒し削除したり端末内画像が既にあるとみなしたりしない。公開前にBackend/Frontend両方の切替とstagingの旧セッション回帰試験を完了する。
 
 ## 撮影通知
 
@@ -264,23 +244,20 @@ Header: `Idempotency-Key: random-value`
 
 購読と未送信予定を削除する。到着、参加停止、期限切れ、Push providerの失効応答でも同じ処理を使う。通知payloadには写真、セッションIDを含めず、一般的な文面と撮影画面への相対URLだけを含める。文面は現行のまま維持する。
 
-## 写真ストーリー
+## 本人用の写真ストーリー（新契約、未実装）
 
-### `GET /v1/memory-sessions/{memorySessionId}/memory`
+### `GET /v2/memory-sessions/{memorySessionId}/memory`
 
-本人用の写真、写真間の再構成経路、写真ごとの地点を時系列に返す。画像取得URLは参加認証後に発行する5分以内の署名付きURLとし、レスポンス・プロキシ・CDNログに参加トークンを含めない。信頼度・確からしさ（accuracy/uncertainty）表現は廃止した（2026-10-26決定、#23）。
-
-経路は写真を撮った順に各写真の地点（チェックポイント）をCampusGraph最短経路でつなぎ、最後の写真からShibaLab（到着）までの区間も最短経路・同じ線で描く。再生は全体10〜20秒で、区間の長さに比例配分し、写真地点で少し停止する。撮影時刻間隔の比例配分は使わない。Backend #7の経路生成まで`segments`は空配列であり、下の非空例を現行提供済みとは扱わない。
+本人Bearerで写真メタデータ・写真地点・経路を時系列に返す。画像とその取得URLは返さない。Backend #7の経路生成まで`segments`は空配列であり、下の非空例を現行提供済みとは扱わない。写真間の地点を撮影順につなぎ、最後の写真からShibaLabまで同じ線で再生する。
 
 ```json
 {
-  "status": "ready",
   "moments": [
     {
       "photoMomentId": "photo-moment-id",
+      "clientPhotoId": "client-generated-id",
       "capturedAt": "2026-07-13T12:05:00Z",
-      "checkpointId": "checkpoint-main-plaza",
-      "imageUrl": "short-lived-private-view-url"
+      "checkpointId": "checkpoint-main-plaza"
     }
   ],
   "segments": [
@@ -296,7 +273,7 @@ Header: `Idempotency-Key: random-value`
 }
 ```
 
-公開スクリーンや描画機はこのAPIを使用できない。本人端末への保存は、端末のcanvasで作った写真ストーリーの画像または写真を明示操作で保存し、サーバーの`deleteAfter`を延長しない（Mino829/TRACE_F#14）。canvasで写真を描くため、写真の短命URLの配信は参加者サイトのオリジンからのGETをCORSで許可する。
+Web Appは返却された`clientPhotoId`で当該端末のローカル写真を読み出し、本人画面のストーリーを合成する。ローカル画像が消失した写真は地点・経路の記録を残して画像欠落を明示し、サーバーから再取得できるようには見せない。本人が明示操作で写真アプリ/ギャラリーへ書き出した複製はWeb Appの削除対象外であり、サーバーの`deleteAfter`も延長しない。公開スクリーンや描画機はこの本人APIを使わない。
 
 ## 状態取得
 
@@ -317,8 +294,8 @@ Header: `Idempotency-Key: random-value`
 }
 ```
 
-Backend #6の写真実装では、`photoSummary`の`ready`/`pending`/`failed`をMemorySessionの実件数から算出し、`maxCount`は12とする。`deleting`は一覧から確認し、保持中の上限には含める。`status`は`main`、`arrived`、`ended`のいずれかである（[状態遷移](state-machine.md)参照）。写真機能の有効化・配備は別操作であり、通知・到着キュー等の未実装項目はこの例に登場するだけで提供済みとみなさない。
-`replayStatus`はArrivalEventの現在状態であり、キュー満杯・30秒の待機超過時も`skipped`を返す。到着がまだ成立していない場合は`null`とする。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。
+旧Backend #6の写真実装では、`photoSummary`の`ready`/`pending`/`failed`を旧クラウド写真のMemorySession実件数から算出し、`maxCount`は12とする。`deleting`は旧写真一覧から確認し、保持中の上限には含める。この旧例の`ready`は新しい端末限定写真の存在・内容をBackendが検証したことを意味しない。新方式の本人画面は`GET /v2/.../photos`でメタデータを照会し、画像の有無は同じ端末内で判定する。`status`は`main`、`arrived`、`ended`のいずれか（[状態遷移](state-machine.md)参照）。通知・到着キュー・新写真APIの未実装項目はこの例に登場するだけで提供済みとみなさない。
+`replayStatus`はArrivalEventの現在状態であり、キュー満杯・30秒の待機超過時も`skipped`を返す。到着がまだ成立していない場合は`null`とする。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。ただし新方式の画像は同じブラウザ内に残る場合に限り閲覧でき、旧写真の本人取得・削除は各`deleteAfter`まで維持する。
 
 ## 運営API
 
@@ -404,7 +381,7 @@ WebSocketのping/pongまたはアプリheartbeatを10秒間隔で送り、30秒�
 - 再接続時は必ず `display.snapshot` から復元する
 - スナップショットには生成時点の`eventId`または連番を含め、それ以前の差分を二重適用しない
 
-参加トークンはURLへ置かず、`localStorage`へ保存する。通知や別タブから開き直しても同じセッションを続けるためである。本人による削除と`deleteAfter`の到達を検知したら、端末から消去する。加工済み写真だけはIndexedDB等へ上限付きで保存し、送信成功、写真削除、セッション削除、失効時に消去する。写真は12枚・合計30MBを超えて端末へ保持しない。複数タブはBroadcastChannel等で既存セッションを検知し、二重の写真送信を開始しない。
+参加トークンはURLへ置かず、同じブラウザで開き直せるよう端末内に保存する。写真Blobは同じブラウザのIndexedDBに1セッション12枚・計30MB以内で保持し、写真単位・セッション削除時はWeb Appが端末内画像とサーバーメタデータの双方を消す。`deleteAfter`到達をWeb Appが検知したときもローカルデータを消すが、アプリを閉じたままの端末・別ブラウザ・写真アプリへ保存した複製をサーバーは削除できない。ブラウザの容量不足・消去・端末紛失では画像は復元できない。複数タブは既存セッションを検知し、二重のメタデータ送信を開始しない。
 
 ## HTTPステータス方針
 
