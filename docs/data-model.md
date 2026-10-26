@@ -3,11 +3,11 @@
 ## 方針
 
 - 本番の正本DBはMVPからマネージドPostgreSQLとする。Google CloudではCloud SQL、AWSではRDSを使用し、標準PostgreSQLの範囲を基本として移植性を保つ
-- 写真バイト列はPostgreSQLへ入れず、非公開オブジェクトストレージへ保存する
+- 新規の写真バイト列はWeb Appの参加端末内だけに保存する。PostgreSQLへは`client_photo_id`・`checkpoint_id`・`captured_at`など経路用の最小メタデータだけを保存し、Cloud Storageや描画機へ新規画像を送らない。旧Cloud Storage写真は既存セッションの`delete_after`まで本人照会・削除・期限清掃を維持する
 - GPS（Geolocation API、撮影時位置取得）は使用しない。緯度経度・位置履歴のテーブルや列を新設しない。写真地点は参加者が3Dマップで選んだ`checkpointId`のみを保存し、座標・対応ノードIDの解決はBackendがCampusGraphから行う（2026-10-26決定、#23）
 - セッションは`MemorySession`単独とする。`LivePresenceSession`は新規発行しない。旧Sessionは各`deleteAfter`まで照会・停止・削除可能な実データとして残し、前倒し削除しない（2026-10-26決定、#23、採用5）
 - `ExperienceLink`、`display_alias`、`on_site_consent_version`は廃止した（2026-10-26決定、#23）
-- 写真・チェックポイント地点・経路・削除冪等性記録は同一期間で一緒に消す（2026-10-26決定、#23）
+- サーバーの写真メタデータ・チェックポイント地点・経路・削除冪等性記録は同一期間で一緒に消す。端末内画像は別領域で、Web Appが削除・期限を検知したときに消す。端末を開かない間の即時消去や明示的に写真アプリへ保存した複製の消去は保証しない
 - 個人名、学籍番号、メールアドレス、端末固有IDを保存しない
 - 各セッションの`expires_at`（新規操作の期限）と`delete_after`（保存データの削除期限）を分離し、失効後も本人の読み取り・自己削除を`delete_after`まで許可する。開発側既定は`expires_at`=作成から6時間、`delete_after`=失効後24時間（2026-10-26決定、#23）。APIセキュリティログ30日・DBバックアップ最大7日は提案値であり、大学承認待ちである
 
@@ -19,9 +19,9 @@
 erDiagram
     MEMORY_SESSION ||--o| ARRIVAL_EVENT : reaches
     MEMORY_SESSION ||--o{ PHOTO_MOMENT : captures
+    MEMORY_SESSION ||--o{ PHOTO_MOMENT_FENCE : prevents_replay
     MEMORY_SESSION ||--o{ ROUTE_SEGMENT : reconstructs
     MEMORY_SESSION ||--o| PUSH_SUBSCRIPTION : enables
-    PHOTO_MOMENT ||--|| PHOTO_ASSET : owns
     CAMPUS_CHECKPOINT ||--o{ PHOTO_MOMENT : anchors
     CAMPUS_NODE ||--o{ CAMPUS_EDGE : connects
 
@@ -70,24 +70,18 @@ erDiagram
     PHOTO_MOMENT {
         string id PK
         string memory_session_id FK
-        string photo_asset_id FK
+        string client_photo_id
         string checkpoint_id FK
         integer sequence_no
         datetime captured_at
+        datetime delete_after
         datetime created_at
     }
 
-    PHOTO_ASSET {
-        string id PK
-        string object_key
-        string content_hash
-        string mime_type
-        integer width
-        integer height
-        integer size_bytes
-        string status
+    PHOTO_MOMENT_FENCE {
+        string memory_session_id FK
+        string client_photo_id PK
         datetime delete_after
-        datetime created_at
     }
 
     ROUTE_SEGMENT {
@@ -171,31 +165,21 @@ erDiagram
 - 外部キー列には参照・削除で使用するインデックスを作る。PostgreSQLは外部キー列のインデックスを自動作成しないため、migration reviewで漏れを検査する
 - Goは上限付き接続プールを共有し、リクエストごとにDB接続を作らない
 - migrationはGitで連番管理し、後方互換のあるexpand-contract方式で適用する。production起動時に破壊的migrationを自動実行しない
-- 期限削除や写真処理を複数workerで実行する場合は、短いトランザクションと`FOR UPDATE SKIP LOCKED`でjobを取得することを原則とし、オブジェクトストレージのAPI呼び出し中にDB lockを保持しない。ただし、以下の開発者承認済みBackend #6の単一インスタンスMVP例外を適用する
+- 旧写真の期限清掃を複数workerで行う場合は短いトランザクションと`FOR UPDATE SKIP LOCKED`を原則とし、外部I/O中のDB lock保持を避ける。ただし既存Backend #6のadvisory lock例外は旧オブジェクトの消去が終わるまで維持する。新しいメタデータ登録にはこの例外を適用しない
 - 日付partition、read replica、provider固有extensionはMVPで先行導入せず、実測した件数、query、VACUUM、復旧要件に基づいて判断する
 
-### Backend #6の写真保存実装
+### 新規の写真メタデータと旧写真実装
 
-対応PR適用後は、論理的なPhotoMomentとPhotoAssetを物理テーブル`photos`の1行で管理する。MemorySessionへの外部キーは`ON DELETE RESTRICT`とし、画像を消す前に親や削除先keyを失わない。`pending`/`ready`/`failed`/`deleting`状態、申告・検証対象メタデータ、`checkpoint_id`、stage/final object key、受付順とアップロード発行期限を持つ。撮影時刻順の取得と受付順の一意性は区別する。
+新方式では`PhotoMoment`をセッションにつき最大12件保存し、`client_photo_id`をセッション内で一意にする。`checkpoint_id`・`captured_at`・受付順と`memory_session_id`を持ち、画像Blob・画像のハッシュ/寸法/URL・オブジェクトキー・`PhotoAsset`は新規作成しない。`client_photo_id`は同じブラウザのIndexedDB上の画像と照合するための不透明IDであり、Backendから画像の存在を検証できない。Backendへのメタデータ受理と端末の画像保存・削除は別の結果として扱う。新規契約は[API仕様](api.md)の`/v2`を参照する。
 
-`memory_sessions.deleting`は写真の新規登録・URL発行を止める内部的な削除フェンスであり、本人認証の`delete_after`を延長しない。無効画像は消去してから`failed`とし、object参照を落とす。削除対象の行はcloud消去成功後にだけ削除する。短期の冪等性記録には内容のハッシュと一方向の写真locatorだけを入れ、URL・画像・平文の写真IDを保持しない。
-
-`photo_upload_fences`にはランダムなアップロード先keyと失効期限だけを保持し、MemorySessionへの外部キーは付けない。まだ有効なgeneration-zero PUTによる削除後の再作成を拒否するゼロバイトobjectの清掃記録である。写真完了・消去確定と同時にoutboxへ登録し、URL失効後にだけobjectと記録を消す。
-
-### 開発者承認済みMVP例外：写真の外部I/Oと直列化
-
-Backend #6では、写真完了・署名URL発行・消去・アップロードフェンス清掃に限り、PostgreSQL advisory lockを保持したまま必要なCloud Storage/IAM APIを呼び出す方式を開発者が選択・承認した。二重のDB/cloud更新と、消去中にフェンスが再作成されて追跡対象から外れる競合を、単純な直列化で防ぐためである。
-
-ロック順はMemorySession→object fenceとし、フェンス清掃はobject fenceだけを取得する。取得後に状態・期限を再読込し、外部消去とoutbox完了を同じ直列化区間へ含める。外部I/Oは既存のAPI 10秒・定期清掃10秒・起動/清掃コマンド30秒のcontext deadlineで制限し、失敗時は永続化済み`deleting`/outboxから再試行する。
-
-代償として外部I/O待ちがDB接続を占有する。最大1 APIインスタンス、既存の接続プール上限、受付停止の移行窓を維持し、実stagingで写真完了と削除の同時負荷・lock待ち・接続上限・期限超過と復旧を検証してから有効化する。複数APIへの拡張や負荷不成立時はこの例外を拡大せず、generation条件付き更新と処理claim/leaseによるロック外I/O方式を別途承認して移行する。
+旧Backend #6の物理`photos`行、`photo_upload_fences`と非公開Cloud Storageは移行前の写真に限り維持する。旧Sessionの本人閲覧・写真単位/全体削除・`delete_after`期限清掃では、旧objectを消去した後で参照レコードを消す。既発行PUT URLが残る写真のゼロバイト占有と期限後のoutbox清掃は、旧画像を失踪・再出現させないため残す。旧方式で承認されたadvisory lockと外部I/Oの直列化（API/清掃10秒、起動30秒のdeadline）は旧データの消去だけの契約であり、新規メタデータ作成へ適用しない。旧写真を無断で前倒し削除しない。migrationは旧読取/削除経路を維持したまま新規画像受付を止めるexpand-contract方式とし、旧データの期限清掃を実測・確認してから旧列/ストレージを廃止する。
 
 ## MemorySession
 
-写真、チェックポイント地点、経路、到着演出、本人用ストーリーを管理する単一のセッションである（2026-10-26決定、#23）。セッション作成時の`campus_graph_version`を記録し、写真地点の`checkpointId`の妥当性検証と経路再構成に使う（旧FR-035のGraph版記録を継承）。
+写真のメタデータ、チェックポイント地点、経路、到着演出を管理する単一セッションである（#23）。写真Blobと本人画面の画像表示は端末内に限る。セッション作成時の`campus_graph_version`を記録し、写真地点`checkpointId`の検証と経路再構成に使う。現行Backendの写真オブジェクト保存とは異なる未実装契約であり、旧Sessionの画像消去責任は残る。
 
 - `status`: `main`（体験中）、`arrived`（到着済み）、`ended`（終了）。`on_site`概念は廃止
-- `consent_version`: `2026-memory-photo-no-gps-draft-1`（jaのみ。enは大学審査後）。位置情報の項目を含まない
+- `consent_version`: 旧草案`2026-memory-photo-no-gps-draft-1`はサーバー写真保存を前提とし、新方式に再利用しない。新しい版・本文と正本の所在は#9で関係者と相談・大学審査後に決定する。承認前は新方式のセッションを発行しない
 - `expires_at`後は写真登録などの新規操作を受け付けず、本人の状態・写真の閲覧と自己削除は`delete_after`まで許可する。開発側既定はTTL 6時間・`delete_after`失効後24時間
 
 ## 廃止エンティティ（旧Session読み取り契約）
@@ -213,20 +197,21 @@ Backend #6では、写真完了・署名URL発行・消去・アップロード�
 
 到着は展示ブースで投影・定期更新する署名・期限付きQRのBackend検証でのみ成立する（2026-10-26決定、#11）。受付ではMemorySessionへArrivalEventを作成し、`status`を`arrived`へ変更して撮影通知を停止する。写真0枚・1枚でも到着は成立する（2026-10-26決定、#23）。再生状態はArrivalEventだけを正とし、MemorySessionへ`replaying`を重複保存しない。
 
-## PhotoMoment・PhotoAsset
+## PhotoMoment（新規メタデータ）
 
-`PhotoMoment`は参加者が残した撮影イベント、`PhotoAsset`は非公開オブジェクトストレージ上の加工済み画像を表す。写真EXIFは保存せず、撮影時GPSは取得しない。写真地点は参加者が3Dマップで選んだ`checkpointId`のみであり、必須である（未選択不可、現行実装準拠、TRACE_F#45）。
+`PhotoMoment`は参加者の撮影した写真のID・地点・時刻をBackendへ伝える記録であり、画像データ自体は端末のIndexedDBだけに置く。新規`PhotoAsset`は作らない。GPSやEXIF、画像特徴はBackendへ送らない。
 
 | 項目 | 内容 |
 |---|---|
-| `sequence_no` | セッション内の撮影順。unique |
-| `checkpoint_id` | 参加者が選んだ写真地点。`CAMPUS_CHECKPOINT`参照。必須。座標・ノードIDはBackendがCampusGraphから解決し、写真行へは地点IDのみ保存する（旧FR-035のGraph版記録はMemorySession側で継承） |
-| `object_key` | 推測困難な非公開オブジェクトキー。URLではない |
-| `content_hash` | アップロード重複・破損検出用。公開しない |
-| `status` | `pending`、`ready`、`failed`、`deleting` |
-| `delete_after` | セッション削除期限以下。独立して延長しない |
+| `client_photo_id` | 端末が生成した不透明ID。MemorySession内でunique。端末の画像との照合用 |
+| `sequence_no` | セッション内の受付順。unique。本人画面は撮影時刻順に表示 |
+| `checkpoint_id` | 参加者が選んだ写真地点。`CAMPUS_CHECKPOINT`参照。必須。座標・ノードIDはBackendがCampusGraphから解決 |
+| `captured_at` | 端末申告の撮影時刻。公開表示の正確な時刻には使わない |
+| `delete_after` | セッション削除期限以下。サーバーメタデータだけに適用 |
 
-写真は1セッション12枚までを暫定上限とする。原画像をそのまま保存せず、向き補正、EXIF除去、長辺1920px以下への縮小、再エンコード後の画像だけを保存する。写真単位削除では、PhotoMoment、PhotoAssetを削除し、前後のRouteSegmentを残った地点から再生成または未確定にする。写真ピン・個別ピン保護閾値・量子化・セッション固定オフセット・平滑化は廃止した（2026-10-26決定、#23）。
+1セッション12件を暫定上限とする。端末はEXIF除去・再エンコードして最大30MB/12枚を上限として保持する。写真単位削除はサーバーメタデータ・地点・経路を更新し、Web Appが当該端末内画像を別に削除する。Web Appが開かれていなければ`delete_after`時刻ちょうどのローカル消去は保証できない。旧サーバー写真の`PhotoAsset`と削除は上の旧実装契約を参照する。
+
+削除済み`client_photo_id`の遅延したオフライン再送で写真が復活しないよう、`photo_moment_fences`にセッションID・client IDを保存する。写真単位削除とfence作成、経路の再計算を同一DBトランザクションで行う。同じIDの後続POSTは404とし、セッション削除・`delete_after`期限清掃でfenceも消す。通常の24時間以内の冪等性記録だけではセッションの`delete_after`まで復活を防げないため、このfenceは画像や地点・時刻を持たずセッションの期限まで残す。旧`photo_upload_fences`とは別のメタデータ用契約である。
 
 ## RouteSegment
 
@@ -254,8 +239,9 @@ MemorySessionに紐づく任意参加の撮影リマインダー。30分ごと�
 - `memory_sessions(delete_after)`
 - `memory_sessions(status, expires_at)`
 - `arrival_events(replay_status, arrived_at)`
-- `photos(memory_session_id, sequence_no)` unique
-- `photos(checkpoint_id)`
+- `photo_moments(memory_session_id, sequence_no)` unique（新規メタデータ）
+- `photo_moments(memory_session_id, client_photo_id)` unique（同一写真の冪等登録）
+- `photo_moment_fences(memory_session_id, client_photo_id)` unique（削除後の再送・復活防止）
 - `route_segments(memory_session_id, started_at)`
 - `push_subscriptions(status, next_send_at)`
 - `campus_nodes(graph_version)`
@@ -268,7 +254,7 @@ MemorySessionに紐づく任意参加の撮影リマインダー。30分ごと�
 
 実装時は、期限・queue走査のqueryに合わせて次の部分インデックスを優先する。
 
-- `photos(delete_after) where status in ('pending', 'deleting')`
+- `photo_moments(delete_after)`（新規メタデータの期限清掃）。旧`photos(delete_after) where status in ('pending', 'deleting')`は旧写真の清掃が終わるまで維持する
 - `arrival_events(arrived_at) where replay_status = 'queued'`
 - `push_subscriptions(next_send_at) where status = 'active'`
 - `memory_sessions(delete_after) where delete_after is not null`
@@ -277,11 +263,11 @@ MemorySessionに紐づく任意参加の撮影リマインダー。30分ごと�
 
 ## 削除
 
-1. MemorySessionの`expires_at`到来時は新規写真登録・URL発行を拒否する。状態照会と自己削除用の資格は`delete_after`まで保持する
-2. `delete_after`到来時は、写真・チェックポイント地点・経路・到着イベント・PushSubscription・削除冪等性記録・トークンハッシュを削除対象にする。同一期間で一緒に消す（2026-10-26決定、#23）
-3. 非公開オブジェクトストレージ上の写真を削除し、成功を確認する
-4. DBレコードをトランザクション内で削除する。オブジェクト削除失敗時は`deleting`として再試行し、期限超過をアラートする
-5. 旧LivePresenceSessionは新規発行しない。既存の旧Sessionは各`deleteAfter`まで照会・停止・削除と期限清掃のみを行い、旧GPSデータは前倒し削除しない（#23採用5）
+1. MemorySessionの`expires_at`到来時は新規写真メタデータ登録を拒否する。本人の状態取得・自己削除資格は`delete_after`まで維持する
+2. `delete_after`到来時はサーバーの写真メタデータ・地点・経路・到着イベント・Push購読・削除冪等性記録・トークンハッシュを同一期間で消す
+3. 旧方式で非公開Cloud Storageに保存した写真があれば、既存の削除フェンス・outboxを用いてオブジェクトの消去成功後に旧DB参照を消す。失敗時は再試行し期限超過をアラートする。移行のために旧データを前倒し削除しない
+4. 端末内画像はWeb Appが写真単位・セッション削除や期限到来を検知したとき消す。端末を開かない間、ブラウザの別領域や明示保存された複製の消去はサーバーから保証しない
+5. 旧LivePresenceSessionは新規発行しない。既存の旧Sessionは各`deleteAfter`まで照会・停止・削除と期限清掃のみ行う（#23採用5）
 6. 個人を復元できない集計値だけを残す場合は、大学への説明と同意文へ明記する
 
 インフラのセキュリティログとバックアップはDB削除と同時に個別レコードを消せない場合があるため、原則として位置情報を含めず、別途定めた短い保持期限で世代ごと削除する。APIセキュリティログ30日・DBバックアップ最大7日は提案値であり、大学承認待ちである。

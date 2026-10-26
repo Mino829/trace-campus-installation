@@ -5,7 +5,7 @@
 体験は`MemorySession`単独で管理する。`LivePresenceSession`の状態機械は廃止した（2026-10-26、#23）。GPSは使用せず、位置による状態遷移は存在しない。写真地点は参加者が3Dマップで選んだ`checkpointId`のみである。
 
 - `MemorySession.status`: 体験中、到着済み、終了のどこか
-- `PhotoAsset.status`: 写真の送信・検証・削除状態
+- `PhotoMoment`: 新規方式は写真メタデータを受理時に確定する。画像の送信・検証状態はサーバーに存在しない（移行前の`PhotoAsset.status`だけ別に維持）
 - `ArrivalEvent.replay_status`: 到着演出がどこまで進んだか
 
 通信切断は永続状態にしない。`last_seen_at`から運営画面が`degraded`と判定し、再接続時は有効期限内の同じセッションを継続する。`MemorySession`は`expires_at`後に新規操作を受け付けない一方、本人の読み取り・自己削除は`delete_after`まで受け付ける。`expires_at`と`delete_after`を同一視しない。
@@ -38,30 +38,14 @@ stateDiagram-v2
 
 到着証明は展示ブースで投影・定期更新する署名・期限付きQRのBackend検証でのみ成立する（2026-10-26決定、#11）。期限切れ、改変、別会場の証明は拒否する。`on_site`概念は廃止した。削除は状態遷移ではなくデータ消去であり、[削除](#削除)を参照する。
 
-## 写真状態
+## 写真メタデータと旧写真状態
 
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: photo metadata accepted (checkpointId required)
-    Pending --> Ready: upload and validation complete
-    Pending --> Failed: timeout or validation failure
-    Ready --> Deleting: participant or session deletes
-    Failed --> Deleting: cleanup
-    Deleting --> [*]: object and records removed
-```
+新方式（未実装・承認待ち）では、Web Appが加工画像を同じブラウザのIndexedDBへ保存してから、写真ID・`checkpointId`・撮影時刻のみをBackendへ送る。端末の保存失敗時は撮影完了としない。通信断中はメタデータの再送待ちを端末内に持ち、再送時には同一`clientPhotoId`と冪等性キーを使う。サーバーが登録を受理した時点で`PhotoMoment`が確定し、`pending`や`ready`への画像アップロード状態遷移はない。Backendは端末画像の存在を確認できず、端末が消失した画像をサーバーから復元することもできない。
 
-| 状態 | 内容 |
-|---|---|
-| `pending` | メタデータ作成済み、画像送信または検証待ち |
-| `ready` | 非公開保存と検証が完了し、本人用ストーリーで利用可能 |
-| `failed` | 送信期限切れ、形式・容量・EXIF検証失敗 |
-| `deleting` | オブジェクトを削除中 |
-
-- 写真メタデータには`checkpointId`が必須である。未選択・無効な地点は登録を拒否する（現行実装準拠、TRACE_F#45）
-- 同じ`clientPhotoId`、ハッシュ、冪等性キーは一つのPhotoMomentへ対応させる
-- 画像検証に失敗した場合はオブジェクトを削除する
-- 写真単位削除では前後のRouteSegmentを無効化し、残った写真地点から再生成する
-- 到着時に`pending`写真がある場合は短時間待ち、完了しなければその写真を除いて演出を生成する
+- 写真メタデータには有効な`checkpointId`が必須である。未選択・無効な地点は登録を拒否する。画像・画像URL・画像のハッシュ/寸法は受け付けない
+- 写真単位削除では前後のRouteSegmentを無効化し、残った写真地点から再生成する。Backend側メタデータ削除とWeb App側画像削除の成否を別々に扱う
+- 到着時に再送待ちの写真がある場合は、Backendが受理済みの写真だけで演出を生成し、未登録の写真を再生対象としない
+- 旧`PhotoAsset`の`pending`→`ready`/`failed`→`deleting`は旧クラウド写真の本人閲覧・削除・各`deleteAfter`での清掃が完了するまで維持する。旧`pending`は画像のアップロード/検証待ち、`deleting`はオブジェクト消去待ちであり、新方式には適用しない
 
 ## 到着演出状態
 
@@ -106,7 +90,7 @@ stateDiagram-v2
 
 ## 削除
 
-削除は状態遷移ではなくデータ消去である。`DELETE /v1/memory-sessions/{memorySessionId}`（単一資格情報、`Idempotency-Key`付き）で写真、チェックポイント地点、経路、到着イベント、Push購読、削除冪等性記録、トークンハッシュを削除する。これらは同一期間で一緒に消す（2026-10-26決定、#23）。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。同じキーによる安全な再送に限り、IDやトークン、写真を含まない24時間以内の短期削除記録から進捗を復元する。旧`DELETE /v1/experiences/{experienceId}`（両資格情報）は旧Session向けの読み取り/削除契約としてのみ残す。
+削除は状態遷移ではなくデータ消去である。`DELETE /v1/memory-sessions/{memorySessionId}`（単一資格情報、`Idempotency-Key`付き）でサーバーの写真メタデータ、チェックポイント地点、経路、到着イベント、Push購読、トークンハッシュを消す。Web Appは同じ参加の端末内画像とメタデータ再送待ちを別に消し、成功/失敗を分けて表示する。Backendの204は端末画像の削除を保証しない。旧写真を持つセッションではオブジェクト消去を確認し、失敗時は旧`deleting`として再試行する。同じキーによる安全な再送に限り、IDやトークン、写真を含まない24時間以内の短期削除記録から進捗を復元する。旧`DELETE /v1/experiences/{experienceId}`（両資格情報）は旧Session向けの読み取り/削除契約としてのみ残す。
 
 ## 異常系
 

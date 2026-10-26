@@ -15,7 +15,7 @@
 
 ## ユースケース図
 
-カメラを提供しない来場者は参加せず、展示を観覧できる前提です。位置情報の同意・位置権限は要求しません。カメラは到着QRの読取のために用います（同意文版`2026-memory-photo-no-gps-draft-1`）。
+カメラを許可しない来場者は参加せず、展示を観覧できる前提です。位置情報の同意・位置権限は要求しません。カメラは写真撮影と到着QRの読取のために用います。旧草案版`2026-memory-photo-no-gps-draft-1`を新方式に再利用せず、同意文の正本・新しい版は#9で関係者相談・大学審査後に決めます。
 
 ```mermaid
 flowchart LR
@@ -82,13 +82,13 @@ flowchart LR
 
 ## 配置図
 
-技術方針はCloudflareサイトWorkerでNext.js静的Webと参加者APIの中継、Google Cloud東京でCloud Run、Cloud SQL for PostgreSQL 17、非公開Cloud Storageを採用します。大学の提供者・処理地域・費用承認と公開経路の検証は未完了です。Cloudflareの処理・ログは東京保存の保証対象ではなく、会場PC上のBackendは開発・承認済み緊急構成に限定します。
+技術方針はCloudflareサイトWorkerでNext.js静的Webと参加者APIの中継、Google Cloud東京でCloud RunとCloud SQL for PostgreSQL 17を採用する。追加の写真画像は端末内IndexedDBだけに置き、正本DBには写真ID・地点・撮影時刻と経路を保存する設計目標（未実装・承認待ち）である。非公開Cloud Storageは旧クラウド写真の本人照会・削除・各`deleteAfter`での清掃が終わるまで保持し、新規写真には使わない。大学の提供者・処理地域・費用承認と公開経路の検証は未完了。Cloudflareの処理・ログは東京保存の保証対象ではなく、会場PC上のBackendは開発・承認済み緊急構成に限定する。
 
 ```mermaid
 flowchart TB
     subgraph ParticipantDevice["参加者スマートフォン"]
         MobileBrowser["ブラウザ<br/>Next.js Web App<br/>カメラ・3Dマップ地点選択"]
-        MobileStorage["localStorage<br/>IndexedDB等<br/>写真＋地点の再送待ち"]
+        MobileStorage["localStorageの参加トークン<br/>IndexedDBの写真・メタデータ再送待ち"]
         MobileBrowser --- MobileStorage
     end
 
@@ -99,7 +99,7 @@ flowchart TB
     subgraph PublicEnvironment["Google Cloud東京（技術方針、公開承認前）"]
         GoBackend["Cloud Run<br/>Go REST API・WebSocket"]
         MainDB[("正本DB<br/>Cloud SQL PostgreSQL 17")]
-        PhotoStore[("非公開写真bucket<br/>Cloud Storage")]
+        PhotoStore[("旧写真専用private bucket<br/>Cloud Storage（期限清掃まで）")]
         NextServer -->|"許可されたAPI + edge secret"| GoBackend
         GoBackend --- MainDB
         GoBackend --- PhotoStore
@@ -140,7 +140,7 @@ flowchart TB
 
 - スマートフォンはCloudflareサイトWorkerの同一オリジンAPIへ外向き接続する。描画WSSは描画PCからGo（Cloud Run）への外向きWebSocket直接接続とし、Workerは中継しない（2026-10-26決定）
 - 学内ネットワークから描画PCへの受信ポート開放を前提としない
-- Cloud SQL PostgreSQL 17と非公開Cloud Storageを東京の正本にする。大学承認・予算承認まで実データ受付を行わない
+- Cloud SQL PostgreSQL 17を新規写真メタデータ・経路の正本にする。非公開Cloud Storageは旧写真の本人閲覧・削除・期限清掃だけに使う。大学承認・予算承認・新しい同意文承認まで実データ受付を行わない
 - 描画ソフトはthree.jsで決定済み（2026-10-26、Issue #12）。Frontendリポジトリの`/display`がそのまま描画クライアント
 - Go BackendはOCI互換コンテナとする。AWS等への変更は別途決定する
 - 主描画PC停止時はバックアップ描画または合成映像へ切り替える
@@ -150,10 +150,10 @@ flowchart TB
 ```mermaid
 flowchart LR
     subgraph WebApp["Next.js Web App"]
-        EntryUI["入口・同意UI<br/>同意文 2026-memory-photo-no-gps-draft-1"]
+        EntryUI["入口・同意UI<br/>新方式の承認済み文面（未決）"]
         PhotoUI["撮影・3Dマップ地点選択UI"]
         ArrivalUI["到着・完了UI"]
-        PhotoQueue["写真＋checkpointId・撮影時刻キュー<br/>上限内"]
+        PhotoQueue["端末画像＋画像なしのメタデータ再送待ち<br/>上限内"]
         SessionCoordinator["セッション復元・複数タブ制御"]
         PhotoUI --> PhotoQueue
         SessionCoordinator --- PhotoUI
@@ -179,7 +179,7 @@ flowchart LR
     end
 
     subgraph Storage["保存領域"]
-        DB[("MemorySession・写真・地点・再構成経路<br/>ArrivalEvent・削除冪等性記録")]
+        DB[("MemorySession・写真メタデータ・地点・経路<br/>ArrivalEvent・削除冪等性記録")]
         Audit[("OperatorAuditLog")]
     end
 
@@ -221,7 +221,7 @@ flowchart LR
 
 ### コンポーネント間の責務
 
-- Web Appは同意、写真撮影と3Dマップ地点選択、写真・地点の送信、参加者への状態表示、停止・削除操作を担当する。座標・ノードID・グラフ版をpayloadへ含めない
+- Web Appは同意、写真画像の端末内保存と3Dマップ地点選択、写真ID・地点・撮影時刻だけの送信、参加者への状態表示、端末とサーバーの削除操作を担当する。座標・ノードID・グラフ版や画像をpayloadへ含めない
 - Go Backendは認証、checkpointIdの検証と座標・ノード解決、最短経路再構成、保存、描画配信を担当する
 - DBはMemorySession単独の参加状態と到着演出状態を保存する。旧LivePresenceSessionは`deleteAfter`までの期限清掃だけが対象
 - 描画PCは点ID列・グラフ版・撮影時刻から表示を生成し、原写真・画像URL・生座標・生GPSを受け取らない
@@ -254,7 +254,7 @@ sequenceDiagram
     Browser->>Front: 参加ページを取得（HTTPS）
     Front-->>Browser: Web Appを配信
     Browser->>API: GET /v1/public/config（Worker中継）
-    API-->>Browser: 受付状態・同意文<br/>（版 2026-memory-photo-no-gps-draft-1）
+    API-->>Browser: 受付状態・承認済みの新同意文<br/>（版・正本は#9で相談中）
     Browser-->>User: 目的・写真地点・保存期間・停止・削除方法を表示
     User->>Browser: 内容に同意して開始
     Browser->>API: POST /v1/memory-sessions（Worker中継）<br/>同意版と言語
@@ -267,13 +267,14 @@ sequenceDiagram
 
     loop 写真を撮るたび
         User->>Browser: 撮影し3Dマップで地点（チェックポイント）を選ぶ
-        Browser->>API: 写真（署名URLでStorageへPUT）<br/>checkpointId・撮影時刻を登録
-        API->>API: 写真を検証・checkpointIdを検証
+        Browser->>Browser: 向き補正・EXIF除去して<br/>IndexedDBへ画像を保存
+        Browser->>API: POST /v2/memory-sessions/{id}/photos<br/>clientPhotoId・checkpointId・capturedAtのみ
+        API->>API: checkpointIdを検証<br/>画像バイト列は受け付けない
         API->>DB: PhotoMoment・地点・撮影時刻を保存
         API->>API: CampusGraphで前回地点からの<br/>最短経路を確定
         API-->>Renderer: 経路差分（グラフ版＋点ID列）
-        API-->>Browser: 保存状態・送信状態
-        Browser-->>User: 写真送信状態を表示
+        API-->>Browser: メタデータ登録の成否
+        Browser-->>User: 端末画像と登録結果を区別して表示
     end
 
     User->>Browser: 展示ブースに投影された到着QRを読み取る
@@ -324,19 +325,19 @@ sequenceDiagram
         Browser->>API: Web Push購読の解除<br/>Idempotency-Key
         API->>DB: 購読を解除し送信予定を削除
         API-->>Browser: 解除済みの現在状態
-        Browser-->>User: 通知停止済み・写真送信継続を表示
-    else 保存済みデータを即時削除する
+        Browser-->>User: 通知停止済み・写真メタデータ登録継続を表示
+    else 保存済みデータを削除する
         User->>Browser: 「今すぐ削除」を選択して確認
-        Browser->>Browser: 写真送信待ちを選択範囲に応じて消去
+        Browser->>Browser: 同じブラウザの写真画像と<br/>再送待ちを消去
         Browser->>API: DELETE MemorySession<br/>Memory用Bearer token・Idempotency-Key
-        API->>DB: 写真・地点・経路・到着と<br/>削除冪等性記録を削除
+        API->>DB: 写真メタデータ・地点・経路・到着と<br/>削除冪等性記録を削除
         API->>DB: 内容を持たない短期の削除冪等性記録を保存
-        DB-->>API: 削除完了
+        DB-->>API: サーバー側の削除完了
         API-->>Renderer: tracking.stopped
         API-->>Browser: 204 No Content
         Browser->>Browser: localStorageのトークンを消去
-        Browser-->>User: 削除完了を表示
-        Note over Browser,DB: 削除後は同じトークンで状態を復元できない
+        Browser-->>User: 端末・サーバー別の削除成否を表示
+        Note over Browser,DB: サーバーの204だけで端末画像の消去は証明できない
     end
 ```
 
@@ -354,17 +355,20 @@ sequenceDiagram
     actor Operator as 運営端末
 
     alt スマートフォンの通信が切断
-        Browser-xAPI: 写真・地点の送信失敗
-        Browser->>Local: 加工済み写真＋checkpointId・撮影時刻を上限内で保持
-        Browser-->>User: 写真の再送待ちを表示
-        Browser->>API: 通信復旧後、写真＋地点を重複なく再送
-        Browser->>Local: 保存完了した写真を消去
+        Browser-xAPI: 写真ID・checkpointId・撮影時刻の登録失敗
+        Browser->>Local: 加工済み画像とメタデータ再送待ちを上限内で保持
+        Browser-->>User: 端末画像保存済み・サーバー未受理を区別して表示
+        Browser->>API: 通信復旧後、画像なしのメタデータだけ冪等再送
+        Browser->>Local: 再送待ちだけ消去し、本人用画像は保持
     else スマートフォンを再読込
         Browser->>API: GET /v1/memory-sessions/{id}<br/>端末内のBearer token
         API->>DB: 状態を取得
         DB-->>API: 到着・再生・期限
-        API-->>Browser: 位置点を含まない現在状態
-        Browser-->>User: 撮影中・到着後・完了の画面を復元
+        API-->>Browser: 到着・再生・期限の現在状態
+        Browser->>API: GET /v2/memory-sessions/{id}/photos
+        API-->>Browser: 写真ID・checkpointId・撮影時刻のみ
+        Browser->>Local: 写真IDに対応する画像を照合
+        Browser-->>User: 状態と画像有無を別に表示し、消失画像は復元不可と案内
     end
 
     alt 描画機またはWSSが切断
@@ -397,7 +401,7 @@ sequenceDiagram
 - 到着は展示ブースの署名・期限付きQRのBackend検証でのみ成立し、ArrivalEvent作成と同じトランザクションで撮影通知の停止を登録する
 - 到着、削除、描画完了は冪等に処理する
 - 主描画機だけが到着演出の開始・完了を確定できる
-- 通信断時は写真＋checkpointId・撮影時刻だけを上限付き保持する。描画の自律表現と復旧時のスナップショットを使用する
+- 通信断時は端末に写真画像と写真ID・`checkpointId`・撮影時刻のメタデータ再送待ちを上限付きで保持する。画像をネットワークへ再送しない。描画の自律表現と復旧時のスナップショットを使用する
 - 本番の正本DBは一つだけとし、会場PC上のBackendと同時書き込みしない
 
 ## 統合前に確認が必要な点
@@ -408,11 +412,11 @@ sequenceDiagram
 |---|---|---|
 | 到着演出の開始方法 | 運営者が`POST /v1/operator/arrivals/{arrivalId}/play`を実行して開始する | 毎回手動で開始するか、Backendがキューから自動開始するか |
 | `participant.arrived`と`arrival.replay.requested`の役割 | 到着時に`participant.arrived`で点ID列・撮影時刻を渡し、再生時に`arrival.replay.requested`を送る | 軌跡を受けた描画機が何をするか、差分とスナップショットの分担 |
-| 参加者画面の状態更新 | 必要なタイミングで`GET /v1/memory-sessions/{id}`を呼び、写真送信状態・到着状態・削除予定日時を取得する | ポーリング間隔、画面更新方法、参加者向け通知を追加するか |
+| 参加者画面の状態更新 | `GET /v1/memory-sessions/{id}`で到着状態・削除予定日時を、`GET /v2/memory-sessions/{id}/photos`でサーバーメタデータを取得する。端末写真の有無はIndexedDBで判定 | ポーリング間隔、画面更新方法、参加者向け通知を追加するか |
 | チェックポイント選択UIの粒度 | 図では3Dマップ上の一覧選択（実装PRは82点）と表記 | ポケモンGO風8か所スポット案との採否、写真地点の再選択（選び直し）の可否。uni-bit・code-yutoと相談中（Mino829/TRACE_F#38・#45） |
 | 主描画機リース | 主描画機だけが再生開始・完了を送れるものとしている | リースの取得方法、有効時間、更新、切断時の解放、待機機への切替手順 |
 | 描画WebSocketの差分復元 | `display.snapshot`のeventIdを基準に古い差分を捨てる | 採用するカーソル方式、順序逆転・欠落・再送の処理 |
-| クラウド提供者 | CloudflareサイトWorker + Google Cloud東京（Cloud Run / Cloud SQL PostgreSQL 17 / 非公開Cloud Storage）を技術方針として採用 | 大学の提供者・処理地域・個人情報承認と費用/公開経路の確認。Cloudflare側の東京処理は保証しない |
+| クラウド提供者 | CloudflareサイトWorker + Google Cloud東京（Cloud Run / Cloud SQL PostgreSQL 17）を新方式の技術方針として採用。非公開Cloud Storageは旧写真の期限清掃まで維持 | 大学の提供者・処理地域・個人情報承認と費用/公開経路の確認。Cloudflare側の東京処理は保証しない |
 | PostgreSQL構成 | Cloud SQL for PostgreSQL 17を正本とする | 可用性、instance size、接続上限、7日上限のバックアップ/PITRと削除保証 |
 | 描画ソフト | three.js採用済み（2026-10-26、Issue #12）。Frontendリポジトリ`/display` | 残る決定は主描画機リースとWSS認証（Issue #11） |
 | Raspberry Pi・音響・照明 | 候補または任意接続として点線で表している | MVPに含める範囲、接続方式、障害時に切り離せる条件 |

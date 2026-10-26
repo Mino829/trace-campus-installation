@@ -10,7 +10,7 @@
 
 ```text
 参加者が3Dマップで写真地点（チェックポイント）を選ぶ
-  -> 端末は写真と checkpointId・撮影時刻を送信
+  -> 端末内に画像を保存し、写真ID・checkpointId・撮影時刻だけをBackendへ送信
   -> Backendが checkpointId を座標と対応Graphノードへ解決
   -> CampusGraph最短経路で写真地点を撮影順につなぐ
   -> 末尾にShibaLab（到着地）までの最短経路を追加
