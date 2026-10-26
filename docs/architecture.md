@@ -1,12 +1,12 @@
 # システム構成
 
-以下の構成図はUnity / TouchDesignerを描画候補とした既存案。three.jsは比較候補に追加されたが採用済みではない。選定後に描画機の構成・配置と通信契約を更新する。
+本構成はMemorySession単独セッションで動く（2026-10-26決定、Issue #23）。描画はthree.jsを採用し、Frontendリポジトリの`/display`がそのまま描画クライアントである（2026-10-26決定、Issue #12）。旧Unity / TouchDesigner構成は撤去する。
 
 ## 全体構成
 
 ```text
 参加者スマートフォン
-  同意・位置取得・開始停止・到着・削除
+  同意・写真撮影（地点選択）・到着・削除
           |
           | HTTPS
           v
@@ -20,10 +20,10 @@ Google Cloud東京（採用する配置先、大学承認前）
   Cloud SQL for PostgreSQL 17: 正本DB
   非公開Cloud Storage: 加工済み写真
           |
-          | WSS（描画機から外向き接続）
+          | WSS（描画PCから外向き接続）
           v
-Unity または TouchDesigner
-  3Dキャンパス・撮影瞬間・再構成経路・到着演出
+Frontend リポジトリ /display（three.js）
+  3Dキャンパス・写真地点・再構成経路・到着演出
           |
           v
 プロジェクター / 音響 / 照明
@@ -31,51 +31,48 @@ Unity または TouchDesigner
 
 本番構成の技術方針はNext.jsの静的書き出しをCloudflareのサイトWorkerで配信し、Go BackendをCloud Run、正本DBをCloud SQL for PostgreSQL 17、加工済み写真を非公開Cloud Storage bucket（いずれも東京）へ置く。大学の提供者・保存/処理地域と費用の承認は未完了。AWS等への変更は別途決定する。
 
-参加者端末は同一オリジンの`/api/backend/*`を通じてGoへ送信する。ただし写真本体はGoが発行する短期署名URLへCloud Storageへ直接PUTする設計で、現行Workerの16KB JSON中継では転送しない。写真APIのWorker許可リストとCloud StorageのCORSは未実装・未検証。描画機はGoへ外向きWSS接続する設計だが認証・公開経路は未確定で、現行Worker中継には含まれない。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。写真原画像や画像URLは描画機へ送らない。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
+参加者端末は同一オリジンの`/api/backend/*`を通じてGoへ送信する。ただし写真本体はGoが発行する短期署名URLへCloud Storageへ直接PUTする設計で、現行Workerの16KB JSON中継では転送しない。写真APIのWorker許可リストとCloud StorageのCORSは未実装・未検証。描画PCはthree.jsの`/display`クライアントをFrontendリポジトリで運用し、Go（Cloud Run）へ外向きWSS接続する（2026-10-26決定）。Workerは中継せず、描画PCの認証・公開経路は未確定で、現行Worker中継には含まれない。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。写真原画像や画像URLは描画機へ送らない。詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を正とする。
 
 ## データ配置
 
 | データ | 保存先 | 方針 |
 |---|---|---|
-| セッション、同意、写真メタデータ、到着、再構成経路 | PostgreSQL | 本番の単一正本。期限削除とバックアップ保持を管理する |
-| 加工済み写真 | 非公開Cloud Storage（東京） | DBにはobject keyだけを保存し、短時間の署名付きアクセスを使う。公開前に処理地域・削除を承認する |
-| 通常GPSの生座標 | 保存しない | リクエスト処理中に検証・変換後、破棄する |
-| 量子化済み最新表示位置 | Goメモリ、拡張時はRedis互換TTLストア | 30〜60秒TTL。PostgreSQLの位置履歴にしない |
+| MemorySession、同意、写真メタデータ、写真地点、到着、再構成経路 | PostgreSQL | 本番の単一正本。期限削除とバックアップ保持を管理する |
+| 加工済み写真 | 非公開Cloud Storage（東京） | DBにはobject keyだけを保存し、短時間の署名付きアクセスを使う。セッション失効後に`delete_after`まで保持し、写真・地点・経路・削除冪等性記録を同一期間で一括消去する。公開前に処理地域・削除を承認する |
+| 生GPS・位置履歴 | 保存しない | リアルタイム位置表現はIssue #23で廃止（2026-10-26）。旧LivePresenceSessionは本人資格での照会・停止・削除と`deleteAfter`期限清掃のみを残す |
 | 合成データ | local / stagingと会場PC | 本番参加者データから作らない |
 
-CloudflareのWorker・転送経路と調査用`trace-push`のD1/KVは東京保存・処理の保証対象ではない。後者を本番の参加者データの正本に流用せず、通知購読情報の本番保存先は別途決定する。
+CloudflareのWorker・転送経路と調査用`trace-push`のD1/KVは東京保存・処理の保証対象ではない。後者を本番の参加者データの正本に流用せず、通知購読情報の本番配置先はTRACE_B#12で未決とする。
 
 ## 拡張境界
 
-MVPではGo Backendを単一の主インスタンスとして開始し、50同時追跡・60セッション相当を検証する。複数Backendへ拡張するときは、最新表示位置、WebSocket fan-out、主描画機leaseをRedis互換ストアまたはメッセージ基盤へ分離する。PostgreSQLは正本のまま維持し、接続プール、Backend最大インスタンス数、DB接続上限を一つの容量計画として管理する。
+MVPではGo Backendを単一の主インスタンスとして開始し、セッション・写真保存・到着・描画配信を一つの容量計画として検証する。複数Backendへ拡張するときは、WebSocket fan-outと主描画機リースをRedis互換ストアまたはメッセージ基盤へ分離する。PostgreSQLは正本のまま維持し、接続プール、Backend最大インスタンス数、DB接続上限を管理する。
 
 ## Web App
 
 - QRコードから匿名参加
-- サーバーから同意文を取得し、位置権限要求前に説明と同意
-- カメラ撮影、プレビュー、向き補正、EXIF除去、縮小、再エンコード
-- `watchPosition` による位置取得
-- 緯度、経度、精度、時刻の送信
-- リアルタイム状態と最終更新、写真の送信・再送状態の表示
-- 追跡停止、即時削除、署名付き到着チェックイン
-- 権限拒否・通信切断時の案内
-- 到着後の状態と再生スキップの表示
-- 本人用の写真ストーリー表示、写真保存、写真単位・全体削除
+- サーバーから同意文（版`2026-memory-photo-no-gps-draft-1`、jaのみ）を取得し、説明と同意
+- カメラ権限は到着QR読取のためだけ要求する。位置権限は要求しない
+- カメラ撮影、プレビュー、3Dマップでの写真地点（チェックポイント）選択、向き補正、EXIF除去、縮小、再エンコード
+- 写真・地点（checkpointId）・撮影時刻の送信と再送状態の表示
+- 到着チェックイン（署名・期限付きQR）、参加停止、削除
+- 通信切断・権限拒否時の案内
+- 到着後の状態と自動削除予定日の表示
+- 本人用の写真ストーリー表示、端末保存、写真単位・全体削除
 
 ## Go Backend
 
-- 写真用MemorySessionとリアルタイム用LivePresenceSession、短期ExperienceLinkの発行
-- 最新位置1件の検証とキャンパス範囲判定。通常GPSの生座標・履歴は永続化しない
-- GPSジャンプの検出、表示用データの平滑化
-- PhotoMomentの発行、写真保存状態、非公開画像アクセスの管理
-- キャンパス経路グラフへのmap matchingと写真間経路の再構成
-- RouteSegmentの信頼度判定と表示用座標列の生成
-- 写真アンカー間の再構成経路の保存と削除
-- 写真撮影地点の量子化ピン、3件以上のフォトスポット、TTL・削除減算
-- Web Push購読（許可しなくても参加できる）と到着・停止・解除・期限時の削除
-- 座標変換・CampusGraph・3D Mapの互換版管理
-- 描画クライアントへのリアルタイム配信
-- 到着イベントと軌跡再生データの生成
+- MemorySession単独の発行・認証。LivePresenceSessionは新規発行せず、既存分は本人資格での状態照会・停止・削除と`deleteAfter`期限清掃のみ残す
+- 同意文版管理。位置情報項目は同意文へ含めない
+- 写真保存（EXIF除去検証、縮小、形式・容量検証）
+- チェックポイント地点検証：`checkpointId`の妥当性検証とCampusGraphノード・ローカル座標への解決。参加者端末のpayloadには座標・ノードID・グラフ版を含めない
+- CampusGraph最短経路の再構成（撮影順の地点＋最後からShibaLab到着区間）
+- 再構成経路の保存と削除（写真・派生データと同一期間）
+- Web Push撮影リマインダー（30分ごと、通知なし参加可）と到着時の停止
+- 到着検証（署名・期限付きQRの到着証明）とArrivalEvent作成
+- CampusGraph・3D Mapの互換版管理と配信切替・ロールバック
+- 描画PCへのWSS配信（グラフの点ID列、グラフ版、写真ごとの点IDと撮影時刻のスナップショットと差分）
+- 到着イベントと軌跡再生データ（点ID列・撮影時刻を含む）
 - ヘルスチェックと運営用状態API
 - 同意文バージョン、保存期限、受付状態の配信
 - レート制限、到着証明検証、期限削除
@@ -87,61 +84,39 @@ MVPではGo Backendを単一の主インスタンスとして開始し、50同�
 - Backendも画像形式、寸法、容量を再検証し、信頼できないメタデータを破棄する
 - オブジェクトストレージのbucketは非公開とし、推測困難なキーと短時間の署名付き取得を使う
 - DBにはオブジェクトキー、状態、ハッシュ、寸法、削除期限を保存し、公開URLを保存しない
-- 描画イベントには短期イベントID、量子化済み座標、復元性の低い色特徴だけを含め、PhotoMoment ID、MemorySession ID、写真、取得URL、生GPSを含めない
+- 描画イベントには点ID・撮影時刻だけを含め、写真・PhotoMoment ID・MemorySession ID・画像URL・生GPSを含めない
 - 本人用写真ストーリーの取得は参加トークンで認証し、署名付きURLを短時間だけ発行する
 
 ## 描画
 
-### Unityを選ぶ場合
+- Frontendリポジトリの`/display`をthree.jsで実装し、主描画PCのプロジェクターへ投影する
+- Goへ外向きWSS接続し、グラフ（CampusGraph）の点ID列・グラフ版・写真ごとの点IDと撮影時刻を受信する
+- 3D座標への対応付けは3D Map設定から描画クライアントが行う
+- 接続断時はスナップショットから復元する
 
-- 3Dキャンパス、カメラ、到着シーケンスを中心に構築
-- GoからWebSocketでイベントを受信
-- 完成したアプリケーションとして固定運用
+## 主要イベント
 
-### TouchDesignerを選ぶ場合
-
-- 粒子、残像、音響同期、プロジェクション表現を中心に構築
-- WebSocketまたはOSCでデータを受信
-- 展示中にパラメータを調整しやすい構成
-
-## 主要イベント案
+描画PCへ送るイベントは、スナップショットと差分でpointId列の変化とphotosの追加を配信する。
 
 ```json
 {
-  "schemaVersion": 1,
-  "eventId": "event-id",
-  "type": "position.updated",
-  "occurredAt": "ISO-8601",
-  "coordinateVersion": "campus-2026-01",
-  "campusGraphVersion": "graph-2026-01",
-  "threeDMapVersion": "map-2026-01",
-  "data": {
-    "livePresenceId": "display-scoped-id",
-    "x": 0,
-    "z": 0,
-    "uncertaintyM": 10,
-    "displayAlias": {"color": "cyan", "symbol": "circle"}
-  }
-}
-```
-
-```json
-{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "eventId": "event-id",
   "type": "participant.arrived",
   "occurredAt": "ISO-8601",
-  "coordinateVersion": "campus-2026-01",
   "campusGraphVersion": "graph-2026-01",
   "threeDMapVersion": "map-2026-01",
   "data": {
     "arrivalId": "arrival-id",
-    "displayAlias": {"color": "cyan", "symbol": "circle"}
+    "pointIds": ["checkpoint-…", "…"],
+    "photos": [
+      {"pointId": "checkpoint-…", "capturedAt": "ISO-8601"}
+    ]
   }
 }
 ```
 
-描画クライアントへ生の緯度経度を送らない。通信契約の正本は[API・WebSocket仕様](api.md)とする。
+描画クライアントへ原写真、画像URL、生の座標・GPS、MemorySession IDを送らない。通信契約の正本は[API・WebSocket仕様](api.md)とする。
 
 ## セキュリティ境界
 
@@ -154,11 +129,10 @@ MVPではGo Backendを単一の主インスタンスとして開始し、50同�
 
 ## 最初に検証する項目
 
-- iOS / Androidでの位置取得精度
-- 画面状態による位置更新の変化
-- 建物付近と屋内の誤差
-- 学内Wi-Fiとモバイル回線の切り替え
-- 同時参加と複数到着の処理
-- 写真ピンの量子化・TTL・3件集計・削除減算
-- 到着後の追加同意とon_siteのエリア・操作時表示
-- 座標・Graph・3D Mapの版同期とロールバック
+- iOS / Androidでの写真保存成功率とEXIF除去
+- 展示ブースのQR読み取りと到着送信の成否（定周期発行と有効期限）
+- 3Dマップ地点選択操作のユーザビリティ、誤選択時の扱い（再選択の可否は未決）
+- 学内Wi-Fiとモバイル回線の切り替え、写真送信の再送
+- 同時到着・同時再生の処理とp95
+- 30分ごとの撮影リマインダーの配信・停止（到着時停止含む）
+- CampusGraph・3D Mapの版不一致の破棄とロールバック

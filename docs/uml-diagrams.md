@@ -2,7 +2,7 @@
 
 この資料は、TRACEの設計書をもとに、利用者、各端末、フロントエンド、バックエンド、DB、描画システムの役割とデータの流れをMermaidで整理したものです。
 
-通信契約は[API・WebSocket仕様](api.md)、状態の正本は[参加追跡・到着演出の状態遷移](state-machine.md)、保存内容は[データモデル](data-model.md)を優先します。実装中に仕様を変更した場合は、該当する設計書と本資料を同じ変更単位で更新します。
+本資料はGPSを用いない仕様（写真地点は参加者が3Dマップで選ぶ `checkpointId` のみ、MemorySession単独セッション）に沿って改訂した（2026-10-26決定、Issue #23）。通信契約は[API・WebSocket仕様](api.md)、状態の正本は[参加追跡・到着演出の状態遷移](state-machine.md)、保存内容は[データモデル](data-model.md)を優先します。実装中に仕様を変更した場合は、該当する設計書と本資料を同じ変更単位で更新します。
 
 ## 図の一覧
 
@@ -15,34 +15,34 @@
 
 ## ユースケース図
 
-カメラや位置情報を提供しない来場者は参加せず、展示を観覧できる前提です。代替参加は用意しません。
+カメラを提供しない来場者は参加せず、展示を観覧できる前提です。位置情報の同意・位置権限は要求しません。カメラは到着QRの読取のために用います（同意文版`2026-memory-photo-no-gps-draft-1`）。
 
 ```mermaid
 flowchart LR
     Participant["参加者"]
     Visitor["参加しない来場者"]
     Operator["運営者"]
-    PrimaryRenderer["主描画機"]
-    StandbyRenderer["待機描画機"]
+    PrimaryRenderer["主描画PC（Frontend /display）"]
+    StandbyRenderer["待機描画PC"]
 
     subgraph TraceSystem["TRACEシステム"]
-        UC01(["作品説明・同意内容を確認する"])
-        UC02(["匿名セッションを開始する"])
-        UC03(["位置情報を送信する"])
-        UC04(["追跡状態を確認する"])
-        UC05(["追跡を停止する"])
+        UC01(["同意文（写真・地点・保存期間）を確認する"])
+        UC02(["匿名のMemorySessionを開始する"])
+        UC03(["写真を撮り3Dマップで地点を選ぶ"])
+        UC04(["参加状態と保存期限を確認する"])
+        UC05(["撮影通知を停止する"])
         UC06(["保存済みデータを削除する"])
-        UC07(["到着チェックインする"])
-        UC09(["到着演出をスキップする"])
+        UC07(["到着QRでチェックインする"])
+        UC08(["写真を端末へ保存する"])
         UC11(["展示を観覧する"])
 
-        UC20(["追跡数・キュー・描画状態を監視する"])
+        UC20(["参加キュー・到着・描画状態を監視する"])
         UC21(["新規受付を停止する"])
         UC22(["到着演出を開始・スキップする"])
         UC23(["フォールバックへ切り替える"])
 
-        UC30(["現在位置と到着イベントを受信する"])
-        UC31(["到着軌跡を再生する"])
+        UC30(["写真地点・経路・到着イベントを受信する"])
+        UC31(["写真地点を繋いだ経路を再生する"])
         UC32(["再生開始・完了・失敗を通知する"])
         UC33(["スナップショットから表示を復元する"])
     end
@@ -54,7 +54,7 @@ flowchart LR
     Participant --> UC05
     Participant --> UC06
     Participant --> UC07
-    Participant --> UC09
+    Participant --> UC08
     Participant --> UC11
 
     Visitor --> UC11
@@ -74,10 +74,11 @@ flowchart LR
 
 ### 権限上のポイント
 
-- 参加者、運営者、描画機は別々の資格情報を使用する
-- 待機描画機は通常表示とスナップショットを受信できるが、演出完了を確定できない
+- 参加者、運営者、描画PCは別々の資格情報を使用する
+- 待機描画PCは通常配信とスナップショットを受信できるが、演出完了を確定できない
 - 運営操作は運営者だけが実行でき、操作履歴を残す
-- 観覧に位置情報の同意を必須としない
+- 参加に位置情報の同意を要求しない。位置権限を使わない
+- 色・記号・`display_alias`・スマホ↔展示の照合表示は廃止した（2026-10-26、Issue #23）
 
 ## 配置図
 
@@ -86,8 +87,8 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph ParticipantDevice["参加者スマートフォン"]
-        MobileBrowser["ブラウザ<br/>Next.js Web App<br/>Geolocation API"]
-        MobileStorage["localStorage<br/>IndexedDB等"]
+        MobileBrowser["ブラウザ<br/>Next.js Web App<br/>カメラ・3Dマップ地点選択"]
+        MobileStorage["localStorage<br/>IndexedDB等<br/>写真＋地点の再送待ち"]
         MobileBrowser --- MobileStorage
     end
 
@@ -105,8 +106,8 @@ flowchart TB
     end
 
     subgraph Venue["展示会場"]
-        subgraph DisplayComputer["主描画PC<br/>Mac mini M4またはGPU搭載PC"]
-            Renderer["UnityまたはTouchDesigner"]
+        subgraph DisplayComputer["主描画PC<br/>（Frontendリポジトリ /display）"]
+            Renderer["three.js描画クライアント"]
         end
 
         subgraph StandbyComputer["バックアップ描画PC"]
@@ -137,10 +138,10 @@ flowchart TB
 
 ### 配置上のポイント
 
-- スマートフォンはCloudflareサイトWorkerの同一オリジンAPIへ外向き接続する。描画WSSの経路・認証は未確定で現行Workerの中継対象外
+- スマートフォンはCloudflareサイトWorkerの同一オリジンAPIへ外向き接続する。描画WSSは描画PCからGo（Cloud Run）への外向きWebSocket直接接続とし、Workerは中継しない（2026-10-26決定）
 - 学内ネットワークから描画PCへの受信ポート開放を前提としない
 - Cloud SQL PostgreSQL 17と非公開Cloud Storageを東京の正本にする。大学承認・予算承認まで実データ受付を行わない
-- 通常GPSの最新表示位置はPostgreSQLへ履歴保存せず、単一BackendではGoメモリ、複数BackendではRedis互換TTLストアへ置く
+- 描画ソフトはthree.jsで決定済み（2026-10-26、Issue #12）。Frontendリポジトリの`/display`がそのまま描画クライアント
 - Go BackendはOCI互換コンテナとする。AWS等への変更は別途決定する
 - 主描画PC停止時はバックアップ描画または合成映像へ切り替える
 
@@ -149,87 +150,86 @@ flowchart TB
 ```mermaid
 flowchart LR
     subgraph WebApp["Next.js Web App"]
-        EntryUI["入口・説明・同意UI"]
-        TrackingUI["追跡状態UI"]
-        ArrivalUI["到着・待機・完了UI"]
-        PositionWatcher["watchPosition<br/>位置取得"]
-        PhotoQueue["写真＋撮影時GPSキュー<br/>最大12枚・30MB"]
+        EntryUI["入口・同意UI<br/>同意文 2026-memory-photo-no-gps-draft-1"]
+        PhotoUI["撮影・3Dマップ地点選択UI"]
+        ArrivalUI["到着・完了UI"]
+        PhotoQueue["写真＋checkpointId・撮影時刻キュー<br/>上限内"]
         SessionCoordinator["セッション復元・複数タブ制御"]
-        EntryUI --> PositionWatcher
-        PositionWatcher --> TrackingUI
-        SessionCoordinator --- TrackingUI
+        PhotoUI --> PhotoQueue
+        SessionCoordinator --- PhotoUI
         SessionCoordinator --- ArrivalUI
     end
 
     subgraph Backend["Go Backend"]
         PublicConfig["公開設定・同意文"]
-        SessionService["Memory / Liveセッション<br/>短期ExperienceLink・認証"]
-        PositionService["位置検証・geofence"]
-        MappingService["座標変換・平滑化・量子化"]
-        ArrivalService["到着証明・キュー・再生状態"]
+        SessionService["MemorySession発行・認証<br/>旧LivePresenceSessionの照会・停止・削除"]
+        PhotoService["写真検証・保存"]
+        CheckpointService["checkpointId検証・<br/>座標と対応Graphノードの解決"]
+        RouteService["CampusGraph最短経路<br/>写真地点を撮影順に接続・ShibaLab到着区間"]
+        ArrivalService["到着証明検証・キュー・再生状態"]
         OperatorService["運営API・監査"]
-        RealtimeService["描画WebSocket<br/>snapshot・差分配信"]
+        RealtimeService["描画WSS<br/>snapshot・点ID差分配信"]
         RetentionService["失効・期限削除"]
 
-        PositionService --> MappingService
-        MappingService --> RealtimeService
+        PhotoService --> CheckpointService
+        CheckpointService --> RouteService
+        RouteService --> RealtimeService
         ArrivalService --> RealtimeService
         OperatorService --> ArrivalService
     end
 
     subgraph Storage["保存領域"]
-        DB[("MemorySession<br/>LivePresenceSession<br/>LivePosition・ArrivalEvent")]
-        Audit[("IdempotencyRecord<br/>OperatorAuditLog")]
+        DB[("MemorySession・写真・地点・再構成経路<br/>ArrivalEvent・削除冪等性記録")]
+        Audit[("OperatorAuditLog")]
     end
 
-    subgraph Display["Unity / TouchDesigner"]
+    subgraph Display["描画PC Frontend /display（three.js）"]
         WSClient["WebSocketクライアント<br/>heartbeat・再接続"]
-        LiveView["現在位置の抽象表現"]
-        Replay["到着軌跡の再生"]
+        RouteView["写真地点経路の光表現"]
+        Replay["到着時の経路再生"]
         Fallback["自律・合成表現"]
-        WSClient --> LiveView
+        WSClient --> RouteView
         WSClient --> Replay
         WSClient --> Fallback
     end
 
     subgraph Operation["運営ダッシュボード"]
-        Monitor["接続・追跡・キュー監視"]
+        Monitor["接続・キュー・描画監視"]
         Controls["受付停止・再生・skip・fallback"]
     end
 
-    EntryUI -->|"GET config・POST sessions"| PublicConfig
+    EntryUI -->|"GET config・POST session"| PublicConfig
     EntryUI --> SessionService
-    PositionWatcher -->|"POST latest position"| PositionService
-    PhotoQueue -->|"POST photo + captured GPS"| SessionService
-    TrackingUI -->|"GET state・POST stop・DELETE"| SessionService
+    PhotoQueue -->|"POST photo + checkpointId"| PhotoService
+    EntryUI -->|"GET state・POST stop・DELETE"| SessionService
     ArrivalUI -->|"POST arrival・GET state"| ArrivalService
     SessionCoordinator --> SessionService
 
     SessionService --> DB
-    PositionService --> DB
-    MappingService --> DB
+    PhotoService --> DB
+    CheckpointService --> DB
+    RouteService --> DB
     ArrivalService --> DB
     RetentionService --> DB
-    SessionService --> Audit
     ArrivalService --> Audit
     OperatorService --> Audit
 
     Monitor -->|"GET operator/status"| OperatorService
     Controls -->|"運営操作"| OperatorService
-    RealtimeService <-->|"WSS・加工済み座標と演出イベント"| WSClient
+    RealtimeService <-->|"WSS・グラフ版＋点ID列＋撮影時刻"| WSClient
 ```
 
 ### コンポーネント間の責務
 
-- Web Appは同意、位置取得、参加者への状態表示、停止・削除操作を担当する
-- Go Backendは認証、位置検証、座標加工、状態管理、保存、描画配信を担当する
-- DBは参加追跡状態と到着演出状態を分けて保存する
-- Unity / TouchDesignerは生の緯度経度を受け取らず、表示用データから表現を生成する
-- 運営画面は監視と運営操作だけを担当し、生位置を表示しない
+- Web Appは同意、写真撮影と3Dマップ地点選択、写真・地点の送信、参加者への状態表示、停止・削除操作を担当する。座標・ノードID・グラフ版をpayloadへ含めない
+- Go Backendは認証、checkpointIdの検証と座標・ノード解決、最短経路再構成、保存、描画配信を担当する
+- DBはMemorySession単独の参加状態と到着演出状態を保存する。旧LivePresenceSessionは`deleteAfter`までの期限清掃だけが対象
+- 描画PCは点ID列・グラフ版・撮影時刻から表示を生成し、原写真・画像URL・生座標・生GPSを受け取らない
+- 運営画面は監視と運営操作だけを担当する
 
 ## シーケンス図
 
-### 通常参加から到着演出まで
+### 参加から写真地点送信・到着再生まで
 
 以下のブラウザ↔Go間のAPI矢印は業務フローの省略表現。実通信はすべてブラウザ→CloudflareサイトWorkerの同一オリジン`/api/backend/*`→Goであり、Workerがedge secretを付与する。描画WSSは描画PCからGo（Cloud Run）への外向きWebSocket直接接続とする（2026-10-26決定）。Workerは中継せず、描画用資格情報の発行契約はIssue #11で整備する。
 
@@ -241,83 +241,74 @@ sequenceDiagram
     participant Front as Cloudflare<br/>サイトWorker
     participant API as Go Backend<br/>（参加者APIはWorker経由）
     participant DB as 正本DB
-    participant Renderer as 描画PC<br/>Unity / TouchDesigner
+    participant Renderer as 描画PC<br/>three.js（/display）
     participant Output as プロジェクター<br/>音響・照明
     actor Operator as 運営端末
 
     Renderer->>API: WSS接続（描画用の短期トークン）
     API->>DB: 現在の参加・到着状態を取得
     DB-->>API: 現在状態
-    API-->>Renderer: display.snapshot
+    API-->>Renderer: display.snapshot<br/>グラフ版＋点ID列
 
     User->>Browser: 入口の参加QRを読み取る
     Browser->>Front: 参加ページを取得（HTTPS）
     Front-->>Browser: Web Appを配信
     Browser->>API: GET /v1/public/config（Worker中継）
-    API-->>Browser: 受付状態・同意文・保存期間・取得間隔
-    Browser-->>User: 目的・取得項目・停止・削除方法を表示
+    API-->>Browser: 受付状態・同意文<br/>（版 2026-memory-photo-no-gps-draft-1）
+    Browser-->>User: 目的・写真地点・保存期間・停止・削除方法を表示
     User->>Browser: 内容に同意して開始
-    Browser->>API: POST /v1/experiences（Worker中継）<br/>写真・リアルタイムの同意版と言語
-    API->>DB: MemorySessionとLivePresenceSessionを別保存<br/>短期ExperienceLinkを作成
+    Browser->>API: POST /v1/memory-sessions（Worker中継）<br/>同意版と言語
+    API->>DB: MemorySessionを作成
     DB-->>API: 保存完了
-    API-->>Browser: 201 各sessionId・各トークン・alias・期限
+    API-->>Browser: 201 sessionId・トークン・TTL・deleteAfter
 
-    Note over Browser: 同意完了後に初めて位置権限を要求
-    Browser-->>User: ブラウザの位置権限を要求
-    User->>Browser: 位置利用を許可
-    Browser->>Browser: watchPositionを開始
+    Note over Browser: 同意完了後に初めてカメラ権限を要求<br/>（地点選択と到着QR読取のため。位置権限は使わない）
+    User->>Browser: カメラを許可
 
-    loop 設定された取得間隔ごと
-        Browser->>API: POST /v1/live-presence-sessions/{id}/position<br/>Live用token・最新位置1件
-        API->>API: 時刻・精度・geofence・ジャンプを検証<br/>座標変換・平滑化・量子化
-        alt 有効な位置点
-            API->>DB: 量子化済みLivePositionを上書き保存<br/>生位置は処理後破棄
-            DB-->>API: 最新位置更新完了
-            API-->>Renderer: position.updated<br/>ローカル座標・不確実性・aliasのみ
-            Renderer->>Output: 現在位置を抽象表現として描画
-        else 無効な位置点
-            API->>API: 保存・描画配信を行わない
-        end
-        API-->>Browser: accepted・rejected・拒否理由
-        Browser-->>User: 追跡状態と最終送信時刻を表示
+    loop 写真を撮るたび
+        User->>Browser: 撮影し3Dマップで地点（チェックポイント）を選ぶ
+        Browser->>API: 写真（署名URLでStorageへPUT）<br/>checkpointId・撮影時刻を登録
+        API->>API: 写真を検証・checkpointIdを検証
+        API->>DB: PhotoMoment・地点・撮影時刻を保存
+        API->>API: CampusGraphで前回地点からの<br/>最短経路を確定
+        API-->>Renderer: 経路差分（グラフ版＋点ID列）
+        API-->>Browser: 保存状態・送信状態
+        Browser-->>User: 写真送信状態を表示
     end
 
     User->>Browser: 展示ブースに投影された到着QRを読み取る
     Browser->>API: POST /v1/memory-sessions/{id}/arrival<br/>Idempotency-Key・署名付き到着証明
     API->>API: 署名・会場・有効期限・再利用を検証
-    API->>DB: ArrivalEventをqueuedで作成<br/>リンク済みLivePresenceをarrivedへ更新
+    API->>DB: ArrivalEventをqueuedで作成
     DB-->>API: arrivalId・キュー状態
-    API-->>Renderer: participant.arrived<br/>arrivalId・alias・加工済み軌跡
+    API-->>Renderer: participant.arrived<br/>写真地点の点ID列・撮影時刻・ShibaLab到着区間
     API-->>Browser: arrivalId・到着状態
-    Browser-->>User: 到着済みの状態、<br/>リアルタイム停止または会場内継続を表示
-    opt 参加者が会場内継続を選ぶ
-        Browser-->>User: on_siteの用途・粒度を説明し追加同意
-        Browser->>API: POST /v1/live-presence-sessions/{id}/on-site
-        API->>DB: presence_phaseをon_siteへ更新
-    end
+    Note over API,DB: 写真0枚でも到着は成立する。<br/>再生は簡易表示へ縮小（2026-10-26決定）
+    Browser-->>User: 完了状態・自動削除予定日時を表示
 
     Operator->>API: GET /v1/operator/status
     API->>DB: 到着キューと描画機状態を取得
     DB-->>API: 運営用状態
-    API-->>Operator: キュー・追跡数・描画機状態
+    API-->>Operator: キュー・描画機状態
+
     Operator->>API: POST /v1/operator/arrivals/{arrivalId}/play
     API-->>Renderer: arrival.replay.requested<br/>主描画機リース対象のみ
     Renderer->>API: arrival.replay.started<br/>eventId・arrivalId・leaseId
     API->>DB: replay_statusをplayingへ更新
-    Renderer->>Output: 10〜20秒の到着軌跡を再生
+    Renderer->>Output: 写真地点を最短経路で繋いだ経路を<br/>10〜20秒・区間長の比例配分で再生
     Renderer->>API: arrival.replay.completed
     API->>DB: replay_statusをcompletedへ更新
 
-    Browser->>API: GET /v1/experiences/{experienceId}
-    API->>DB: 追跡・再生状態を取得
-    DB-->>API: arrived/on_site/stopped・completed・deleteAfter
+    Browser->>API: GET /v1/memory-sessions/{id}
+    API->>DB: 到着・再生状態を取得
+    DB-->>API: arrived/stopped・completed・deleteAfter
     API-->>Browser: 位置点を含まない現在状態
-    Browser-->>User: 完了状態と削除予定日時を表示
+    Browser-->>User: 完了状態・削除予定日時・<br/>写真ストーリーの端末保存を表示
 ```
 
-### 参加者による追跡停止・データ削除
+### 参加者による撮影通知停止・データ削除
 
-追跡停止は新しい位置点を止める操作で、保存済みデータの削除とは分けて扱います。
+到着で撮影通知は自動停止する。ここでは任意の停止と削除を扱います。
 
 ```mermaid
 sequenceDiagram
@@ -326,23 +317,19 @@ sequenceDiagram
     participant Browser as スマートフォン<br/>Next.js Web App
     participant API as Go Backend
     participant DB as 正本DB
-    participant Renderer as 描画PC<br/>Unity / TouchDesigner
+    participant Renderer as 描画PC<br/>three.js（/display）
 
-    alt 追跡だけを停止する
-        User->>Browser: 「追跡停止」を選択
-        Browser->>Browser: watchPositionを停止
-        Browser->>API: POST /v1/live-presence-sessions/{id}/stop<br/>Idempotency-Key・reason
-        API->>DB: tracking_statusをstoppedへ更新<br/>delete_afterを前倒し
-        DB-->>API: 現在状態
-        API-->>Renderer: tracking.stopped
-        API-->>Browser: 停止済みの現在状態
-        Browser-->>User: 追跡停止済み・保存期限・削除操作を表示
-        Note over API,DB: 停止後に届いた位置点は保存しない
+    alt 撮影通知だけを停止する
+        User->>Browser: 「通知を停止」を選択
+        Browser->>API: Web Push購読の解除<br/>Idempotency-Key
+        API->>DB: 購読を解除し送信予定を削除
+        API-->>Browser: 解除済みの現在状態
+        Browser-->>User: 通知停止済み・写真送信継続を表示
     else 保存済みデータを即時削除する
         User->>Browser: 「今すぐ削除」を選択して確認
-        Browser->>Browser: watchPositionを停止<br/>写真送信待ちを選択範囲に応じて消去
-        Browser->>API: DELETE Memory / Live / both<br/>各Bearer token・Idempotency-Key
-        API->>DB: 選択したセッションと関連データを削除<br/>片方削除時にExperienceLinkも削除
+        Browser->>Browser: 写真送信待ちを選択範囲に応じて消去
+        Browser->>API: DELETE MemorySession<br/>Memory用Bearer token・Idempotency-Key
+        API->>DB: 写真・地点・経路・到着と<br/>削除冪等性記録を削除
         API->>DB: 内容を持たない短期の削除冪等性記録を保存
         DB-->>API: 削除完了
         API-->>Renderer: tracking.stopped
@@ -363,41 +350,34 @@ sequenceDiagram
     participant Local as 端末内一時領域<br/>IndexedDB等
     participant API as Go Backend
     participant DB as 正本DB
-    participant Renderer as 描画PC<br/>Unity / TouchDesigner
-    participant Output as プロジェクター<br/>音響・照明
+    participant Renderer as 描画PC<br/>three.js（/display）
     actor Operator as 運営端末
 
     alt スマートフォンの通信が切断
-        Browser-xAPI: 位置送信失敗
-        Browser->>Browser: 失敗した通常GPSを破棄
-        Browser-->>User: リアルタイム更新停止を表示
-        opt 写真送信が失敗した場合
-            Browser->>Local: 加工済み写真＋撮影時GPSだけ上限内で保持
-            Browser-->>User: 写真の再送待ちを表示
-        end
-        Browser->>API: 通信復旧後の最新位置1件を送信
-        API->>DB: LivePositionを上書き
-        Browser->>API: 写真＋撮影時GPSを重複なく再送
+        Browser-xAPI: 写真・地点の送信失敗
+        Browser->>Local: 加工済み写真＋checkpointId・撮影時刻を上限内で保持
+        Browser-->>User: 写真の再送待ちを表示
+        Browser->>API: 通信復旧後、写真＋地点を重複なく再送
         Browser->>Local: 保存完了した写真を消去
     else スマートフォンを再読込
-        Browser->>API: GET /v1/experiences/{experienceId}<br/>端末内の各Bearer token
+        Browser->>API: GET /v1/memory-sessions/{id}<br/>端末内のBearer token
         API->>DB: 状態を取得
-        DB-->>API: 追跡・再生・期限
+        DB-->>API: 到着・再生・期限
         API-->>Browser: 位置点を含まない現在状態
-        Browser-->>User: 追跡中・到着後・完了の画面を復元
+        Browser-->>User: 撮影中・到着後・完了の画面を復元
     end
 
     alt 描画機またはWSSが切断
         Renderer-xAPI: heartbeat・WSS切断
-        Renderer->>Output: 最後の状態から自律表現へ移行
+        Renderer->>Renderer: 最後の状態から自律表現へ移行
         Operator->>API: GET /v1/operator/status
         API-->>Operator: 描画機をdegradedとして表示
         Renderer->>API: 指数バックオフでWSS再接続
         API->>DB: 現在の参加・到着状態を取得
         DB-->>API: 現在状態
-        API-->>Renderer: display.snapshot<br/>生成時点のeventIdまたは連番付き
+        API-->>Renderer: display.snapshot<br/>生成時点のeventId付き
         Renderer->>Renderer: snapshot以前の差分を二重適用せず復元
-        Renderer->>Output: リアルタイム表示へ自然に復帰
+        Note over API,Renderer: 版不一致イベントは破棄し、<br/>直前の互換版表示へ戻す
         opt 再生中に主描画機が切断した場合
             Note over API,Renderer: 別端末で自動再開しない
             Operator->>API: skipまたは承認付き再試行
@@ -408,14 +388,16 @@ sequenceDiagram
 
 ## 図と実装で共通に守ること
 
-- 同意完了前にブラウザの位置情報APIを呼び出さない
+- GPS・位置情報API（Geolocation、watchPosition）を参加フローで使用しない
+- 同意文はカメラ許可のみを参加条件とし、位置情報の項目を含めない
+- 参加者が送るpayloadに座標・対応ノードID・グラフ版を含めない（MemorySession単独方針）
+- 参加者の資格情報はMemorySession単独とする。旧LivePresenceSessionは本人照会・停止・削除と期限清掃以外の用途を持たない
 - 参加トークンをURL、ログ、描画イベントへ含めず、サーバーにはハッシュだけを保存する
-- 描画機へ渡すのは加工済みローカル座標であり、生の緯度経度は渡さない
-- 到着受付とExperienceLink済みLivePresenceの`arrived`更新は同じDBトランザクションで処理する
-- 追跡状態と到着演出状態は別々に管理する
-- 到着、停止、削除、描画完了は冪等に処理する
+- 描画機へ渡すのは点ID・グラフ版・撮影時刻であり、原写真・画像URL・生座標・生GPSは渡さない
+- 到着は展示ブースの署名・期限付きQRのBackend検証でのみ成立し、ArrivalEvent作成と同じトランザクションで撮影通知の停止を登録する
+- 到着、削除、描画完了は冪等に処理する
 - 主描画機だけが到着演出の開始・完了を確定できる
-- 通信断時は通常GPSを保持せず、写真＋撮影時GPSだけを上限付き保持する。描画の自律表現と復旧時のスナップショットを使用する
+- 通信断時は写真＋checkpointId・撮影時刻だけを上限付き保持する。描画の自律表現と復旧時のスナップショットを使用する
 - 本番の正本DBは一つだけとし、会場PC上のBackendと同時書き込みしない
 
 ## 統合前に確認が必要な点
@@ -425,23 +407,21 @@ sequenceDiagram
 | 確認事項 | 現在の図での暫定解釈 | 統合前に決めること |
 |---|---|---|
 | 到着演出の開始方法 | 運営者が`POST /v1/operator/arrivals/{arrivalId}/play`を実行して開始する | 毎回手動で開始するか、Backendがキューから自動開始するか |
-| `participant.arrived`と`arrival.replay.requested`の役割 | 到着時に`participant.arrived`で加工済み軌跡を渡し、再生時に`arrival.replay.requested`を送る | 軌跡をどちらのイベントへ含めるか、各イベントを受けた描画機が何をするか |
-| 参加者画面の状態更新 | 必要なタイミングで`GET /v1/experiences/{experienceId}`を呼び、各セッション状態・待ち順・再生完了を取得する | ポーリング間隔、画面更新方法、参加者向けリアルタイム通知を追加するか |
-| 追跡停止APIの成功応答 | 状態遷移資料に合わせて、停止済みの現在状態を返す | HTTP statusとresponse bodyの正式な形式 |
-| 削除時の描画機通知 | `tracking.stopped`で表示停止とキュー除外を伝える | 削除専用イベントや再生キャンセルイベントが必要か、描画側の消去範囲 |
+| `participant.arrived`と`arrival.replay.requested`の役割 | 到着時に`participant.arrived`で点ID列・撮影時刻を渡し、再生時に`arrival.replay.requested`を送る | 軌跡を受けた描画機が何をするか、差分とスナップショットの分担 |
+| 参加者画面の状態更新 | 必要なタイミングで`GET /v1/memory-sessions/{id}`を呼び、写真送信状態・到着状態・削除予定日時を取得する | ポーリング間隔、画面更新方法、参加者向け通知を追加するか |
+| チェックポイント選択UIの粒度 | 図では3Dマップ上の一覧選択（実装PRは82点）と表記 | ポケモンGO風8か所スポット案との採否、写真地点の再選択（選び直し）の可否。uni-bit・code-yutoと相談中（Mino829/TRACE_F#38・#45） |
 | 主描画機リース | 主描画機だけが再生開始・完了を送れるものとしている | リースの取得方法、有効時間、更新、切断時の解放、待機機への切替手順 |
-| 描画WebSocketの差分復元 | `display.snapshot`のeventIdまたは連番を基準に古い差分を捨てる | 採用するカーソル方式、順序逆転・欠落・再送の処理 |
-| 未来時刻の位置点 | 図では「入力検証」とだけ記載し、処理を確定していない | `FUTURE_TIME`として拒否するか、受信時刻へ補正するか。API仕様と座標変換資料で記述が異なる |
-| 描画へ渡す誤差情報 | 図では「不確実性」と表記している | `accuracyM`と`uncertaintyM`のどちらを正式名称にするか、生の精度か加工後の値か |
-| 到着後のリアルタイム位置 | `arrived`で停止か追加同意による`on_site`を選ぶ | on_siteの点・エリア・操作時表示の採用基準 |
+| 描画WebSocketの差分復元 | `display.snapshot`のeventIdを基準に古い差分を捨てる | 採用するカーソル方式、順序逆転・欠落・再送の処理 |
 | クラウド提供者 | CloudflareサイトWorker + Google Cloud東京（Cloud Run / Cloud SQL PostgreSQL 17 / 非公開Cloud Storage）を技術方針として採用 | 大学の提供者・処理地域・個人情報承認と費用/公開経路の確認。Cloudflare側の東京処理は保証しない |
 | PostgreSQL構成 | Cloud SQL for PostgreSQL 17を正本とする | 可用性、instance size、接続上限、7日上限のバックアップ/PITRと削除保証 |
-| 描画ソフト | 図はUnityまたはTouchDesignerの既存案。three.jsも比較候補だが未採用 | 最終方式と描画クライアントの配置先・通信契約を決める。実作業担当はcode-yuto |
+| 描画ソフト | three.js採用済み（2026-10-26、Issue #12）。Frontendリポジトリ`/display` | 残る決定は主描画機リースとWSS認証（Issue #11） |
 | Raspberry Pi・音響・照明 | 候補または任意接続として点線で表している | MVPに含める範囲、接続方式、障害時に切り離せる条件 |
+| 写真0枚・1枚の到着 | 到着は成立し、再生は簡易表示（スポット名や写真の有無の案内）へ縮小する（2026-10-26決定） | 簡易表示の具体的な絵作り・文言 |
+
+旧契約の位置系の暫定解釈（`on_site`追加同意、使用する精度、ExperienceLink、両セッションDELETEの応答など）は2026-10-26の決定（Issue #23）で廃止したため、本表から削除した。
 
 ### 統合時の更新ルール
 
 - 決定した項目は「暫定解釈」のまま残さず、該当する図と設計書へ反映する
 - APIまたはイベントを変更した場合は、送信側と受信側の担当者が同じ内容で合意する
-- 未決の機能はインターフェースをモック化し、統合時に暗黙の仕様を持ち込まない
-- リアルタイム位置の本番利用に関わる未決事項が残る場合は、合成データ表示をフォールバックとする
+- 未決の機能はインターフェースをモック化し、統合時に暗黙の仕様を持ち込まない。GPSに紐づく旧表現は復活させない
