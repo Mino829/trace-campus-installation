@@ -1,84 +1,51 @@
-# 参加追跡・到着演出の状態遷移
+# セッション・到着演出の状態遷移
 
 ## 分離方針
 
-写真の思い出、リアルタイム位置、会場内フェーズ、到着演出は別の関心事として管理する。到着は演出を開始するが、リアルタイム位置を自動停止しない。
+体験は`MemorySession`単独で管理する。`LivePresenceSession`の状態機械は廃止した（2026-10-26、#23）。GPSは使用せず、位置による状態遷移は存在しない。写真地点は参加者が3Dマップで選んだ`checkpointId`のみである。
 
-- `LivePresenceSession.tracking_status`: 通常GPSの最新値を受け付けるか
-- `LivePresenceSession.presence_phase`: 来場前、到着、会場内、終了のどこか
-- `PhotoAsset.status`: 写真の送信・検証・削除状態
+- `MemorySession.status`: 体験中、到着済み、終了のどこか
+- `PhotoMoment`: 新規方式は写真メタデータを受理時に確定する。画像の送信・検証状態はサーバーに存在しない（移行前の`PhotoAsset.status`だけ別に維持）
 - `ArrivalEvent.replay_status`: 到着演出がどこまで進んだか
 
-通信切断は永続状態にしない。`last_seen_at`から運営画面が`degraded`と判定し、再接続時は有効期限内の同じセッションを継続する。
+通信切断は永続状態にしない。`last_seen_at`から運営画面が`degraded`と判定し、再接続時は有効期限内の同じセッションを継続する。`MemorySession`は`expires_at`後に新規操作を受け付けない一方、本人の読み取り・自己削除は`delete_after`まで受け付ける。`expires_at`と`delete_after`を同一視しない。
 
-## 追跡状態
+## MemorySession状態
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Tracking: consent accepted
-    Tracking --> Stopped: participant or operator stops
-    Tracking --> Expired: expires_at reached
-    Stopped --> [*]
-    Expired --> [*]
+    [*] --> main: session created (consent accepted)
+    main --> arrived: signed and expiring QR verified
+    arrived --> ended: replay finished or session closed
+    main --> ended: expires_at reached
+    arrived --> ended: expires_at reached
+    ended --> [*]: deleteAfter reached, data deleted
 ```
 
-| 状態 | 内容 | 位置点受付 |
+| 状態 | 内容 | 新規操作 |
 |---|---|---:|
-| `tracking` | 同意済みで追跡中 | Yes |
-| `stopped` | 参加者、運営の操作により停止 | No |
-| `expired` | 追跡上限を過ぎて失効 | No |
+| `main` | 同意済みで体験中。写真撮影・地点申告・到着待ち | Yes |
+| `arrived` | 到着証明を検証済み。撮影通知を停止 | 写真登録は可（失効前） |
+| `ended` | 再生完了または失効。完了状態・削除予定日時・ストーリー保存の表示のみ | No |
 
 | 現在 | イベント | 次 | サーバー処理 |
 |---|---|---|---|
-| - | `live_presence.created` | `tracking` | 専用トークン、追跡失効、削除期限を発行 |
-| `tracking` | `tracking.stop` | `stopped` | `stop_reason`を記録し、以降の位置点を拒否 |
-| `tracking` | `live_presence.expire` | `expired` | 位置送信用資格を失効させ、最新表示位置を破棄して以降の位置点を拒否。状態取得と自己削除用の資格は`delete_after`まで保持 |
+| - | `session.created` | `main` | トークン、`expires_at`（既定6時間）、`delete_after`（失効後24時間）を発行 |
+| `main` | `arrival.accepted` | `arrived` | 署名・期限付きQRを検証し、ArrivalEventを作成、撮影通知を停止 |
+| `main` | `session.expire` | `ended` | 新規操作を拒否。照会・自己削除は`delete_after`まで維持 |
+| `arrived` | `session.expire` | `ended` | 同上 |
+| `arrived` | `replay.completed` / `replay.skipped` | `arrived`（維持） | 演出状態はArrivalEventだけを正とし、`status`を上書きしない |
 
-MemorySessionも自身の`expires_at`後に追跡操作を停止する一方、各セッションは自身の`delete_after`まで本人の読み取り・自己削除を受け付ける。`expires_at`と`delete_after`を同一視しない。
+到着証明は展示ブースで投影・定期更新する署名・期限付きQRのBackend検証でのみ成立する（2026-10-26決定、#11）。期限切れ、改変、別会場の証明は拒否する。`on_site`概念は廃止した。削除は状態遷移ではなくデータ消去であり、[削除](#削除)を参照する。
 
-## 会場内フェーズ
+## 写真メタデータと旧写真状態
 
-```mermaid
-stateDiagram-v2
-    [*] --> Approaching: live presence created
-    Approaching --> Arrived: arrival accepted and linked
-    Arrived --> OnSite: explicit additional consent accepted
-    Arrived --> Ended: participant stops
-    OnSite --> Ended: participant stops or session expires
-```
+新方式（未実装・承認待ち）では、Web Appが加工画像を同じブラウザのIndexedDBへ保存してから、写真ID・`checkpointId`・撮影時刻のみをBackendへ送る。端末の保存失敗時は撮影完了としない。通信断中はメタデータの再送待ちを端末内に持ち、再送時には同一`clientPhotoId`と冪等性キーを使う。サーバーが登録を受理した時点で`PhotoMoment`が確定し、`pending`や`ready`への画像アップロード状態遷移はない。Backendは端末画像の存在を確認できず、端末が消失した画像をサーバーから復元することもできない。
 
-- `approaching`: 展示場へ来る前。最新位置をキャンパス展示へ使う
-- `arrived`: 到着済み。撮影通知は終了するが、通常GPSの停止・会場内継続を選べる
-- `on_site`: 用途・粒度を示した追加同意後。原則エリア表示とし、精度不足時は操作時だけの表示へ落とす
-- `ended`: 表示終了。最新位置を削除する
-
-ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`は有効な到着処理で`arrived`になったセッションからだけ進める。到着QRの受付だけでは移行せず、会場内用途・表示粒度を示した本人の明示的な追加同意版を必須にする。到着証明の具体的な仕組みは、展示ブースで投影する署名・期限付きQRのBackend検証とする（2026-10-26決定、Issue #11）。
-
-## 写真状態
-
-```mermaid
-stateDiagram-v2
-    [*] --> Pending: photo metadata accepted
-    Pending --> Ready: upload and validation complete
-    Pending --> Failed: timeout or validation failure
-    Ready --> Deleting: participant or session deletes
-    Failed --> Deleting: cleanup
-    Deleting --> [*]: object and records removed
-```
-
-| 状態 | 内容 |
-|---|---|
-| `pending` | メタデータ作成済み、画像送信または検証待ち |
-| `ready` | 非公開保存と検証が完了し、本人用ストーリーで利用可能 |
-| `failed` | 送信期限切れ、形式・容量・EXIF検証失敗 |
-| `deleting` | オブジェクトと派生データを削除中 |
-
-- 同じ`clientPhotoId`、ハッシュ、冪等性キーは一つのPhotoMomentへ対応させる
-- 画像検証に失敗した場合はオブジェクトを削除し、公開描画イベントを送らない
-- 写真単位削除では前後のRouteSegmentを無効化し、残りの写真アンカーから再生成する
-- `ready`遷移時に短期の写真ピンを発行し、削除・期限切れ時に消去とフォトスポット減算を発行する
-- 到着時に`pending`写真がある場合は暫定15秒待ち、完了しなければその写真を除いて演出を生成する
-- 写真0枚・1枚でも到着演出とセッション終了を妨げない
+- 写真メタデータには有効な`checkpointId`が必須である。未選択・無効な地点は登録を拒否する。画像・画像URL・画像のハッシュ/寸法は受け付けない
+- 写真単位削除では前後のRouteSegmentを無効化し、残った写真地点から再生成する。Backend側メタデータ削除とWeb App側画像削除の成否を別々に扱う
+- 到着時に再送待ちの写真がある場合は、Backendが受理済みの写真だけで演出を生成し、未登録の写真を再生対象としない
+- 旧`PhotoAsset`の`pending`→`ready`/`failed`→`deleting`は旧クラウド写真の本人閲覧・削除・各`deleteAfter`での清掃が完了するまで維持する。旧`pending`は画像のアップロード/検証待ち、`deleting`はオブジェクト消去待ちであり、新方式には適用しない
 
 ## 到着演出状態
 
@@ -108,24 +75,27 @@ stateDiagram-v2
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
 | `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
 
+再生データはグラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻である。経路は写真を撮った順に各写真の地点をCampusGraph最短経路でつなぎ、最後の写真からShibaLab（到着）までの区間も同じ線で描く。再生は全体10〜20秒、区間の長さに比例配分、写真地点で少し停止する。
+
+**写真0枚・1枚の到着**: 到着自体は写真枚数に依存せず成立する（2026-10-26決定、#23）。0枚・1枚のときは再生を簡易表示（スポット名や写真の有無の案内）に縮小し、経路再生または単一地点表示に落ち着かせる。到着とセッション終了を妨げない。2枚以上のときは写真地点を結ぶ経路再生を返す。
+
 ## 冪等性・競合制御
 
 - 到着済みセッションへの到着要求は既存のArrivalEventを返す
-- 停止済みセッションへの停止要求は成功として現在状態を返す
-- LivePresenceSessionごとに通常GPSは最新1件だけを上書きし、古い`recordedAt`を拒否する
 - 描画機からの同じ`eventId`は一度だけ適用する
-- 到着作成と、有効なExperienceLinkを介した`presence_phase=arrived`更新を一つのDBトランザクションで行う
+- 到着作成はArrivalEvent作成と`status=arrived`更新を一つのDBトランザクションで行う
 - 演出開始は主描画機リースを持つ一台だけが確定できる
 - 終端状態から別の状態へ戻さない
+- 版不一致の描画イベントは破棄し、直前互換版へ戻す（2026-10-26決定、#23）
 
 ## 削除
 
-削除は状態遷移ではなくデータ消去である。MemorySession削除とLivePresenceSession削除を分け、両トークンを要求する`DELETE /v1/experiences/{experienceId}`では各処理を独立して完了させる。`Authorization`にはMemory用Bearer token、`X-Trace-Live-Token`にはLive用tokenを渡し、bodyなし、`Idempotency-Key`を付ける。HTTP 200の`{memory: "deleted"|"pending", live: "deleted"|"pending", complete: boolean}`で各側の結果を返す。一方が`pending`または通信失敗なら、両資格情報と同じキーを保持して再送し、完了側を復活させず未完了側だけ進める。別の個別DELETEで一方を消した後は残る側の個別DELETEを使う。片方を削除した時点でExperienceLinkを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。同じキーによる安全な再送に限り、IDやトークン、写真、位置、セッション内容を持たない24時間以内の短期削除記録から進捗を復元する。
+削除は状態遷移ではなくデータ消去である。`DELETE /v1/memory-sessions/{memorySessionId}`（単一資格情報、`Idempotency-Key`付き）でサーバーの写真メタデータ、チェックポイント地点、経路、到着イベント、Push購読、トークンハッシュを消す。Web Appは同じ参加の端末内画像とメタデータ再送待ちを別に消し、成功/失敗を分けて表示する。Backendの204は端末画像の削除を保証しない。旧写真を持つセッションではオブジェクト消去を確認し、失敗時は旧`deleting`として再試行する。同じキーによる安全な再送に限り、IDやトークン、写真を含まない24時間以内の短期削除記録から進捗を復元する。旧`DELETE /v1/experiences/{experienceId}`（両資格情報）は旧Session向けの読み取り/削除契約としてのみ残す。
 
 ## 異常系
 
 - 描画機が接続されていない場合も到着を受け付け、上限内でキューへ保持する
 - 設定時間内に再生を開始できなければ`skipped`とし、通常展示を継続する
-- 端末時刻が不正でも、到着と停止はサーバー受信時刻を正とする
+- 端末時刻が不正でも、到着はサーバー受信時刻とQRの署名・有効期限を正とする
 - 主描画機が再生中に切断した場合は、同じ演出を自動で別端末から再開せず、skipまたは運営承認付き再試行とする
 - 参加者が再生前に削除した場合はキューから除外し、描画機へ停止イベントを送る
