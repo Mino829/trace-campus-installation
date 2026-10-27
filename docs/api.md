@@ -148,6 +148,8 @@ Backendは本人Bearerと有効なMemorySessionを確認し、サーバー時刻
 
 描画機は参加者の演出を再生している間、展示画面の到着QRを非表示にする。非表示は到着受付の停止やQRの失効を意味しない。直前に読んだQRなど、有効な証明で再生中に届いた到着も検証・受付し、順番を待つ。再生終了後、展示画面は有効な到着QRを再表示する。短期QRでも撮影済みの値の期限内利用は防げないため、非表示だけを不正利用対策とみなさない。展示画面の実装・実機確認はFrontend #36で行う。
 
+通常の再生開始は自動とする。主描画機は待機中の到着を到着順に選び、前の演出が終了して再生可能になったら開始要求を送る。Backendが主リースと到着状態を検証して`playing`を確定した後に再生する。運営者の毎回の開始操作を前提としない。運営による障害後の再試行・強制操作は通常開始とは別の契約として確定する。
+
 ## データ削除
 
 ### `DELETE /v1/memory-sessions/{memorySessionId}`
@@ -305,7 +307,6 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 - `POST /v1/operator/arrivals/{arrivalId}/skip`: 到着演出をスキップ
 - `POST /v1/operator/fallback`: 自律映像へ切り替え
 - `POST /v1/operator/registration/close`: 新規参加受付を停止
-- `POST /v1/operator/arrivals/{arrivalId}/play`: 主描画機へ再生を指示
 - `POST /v1/operator/notifications/stop`: 全撮影通知を停止
 - `GET /health/live`: プロセスの生存確認
 - `GET /health/ready`: DBと必要サービスの準備確認
@@ -363,7 +364,7 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 
 ### サーバーから描画機へのその他のイベント
 
-- `arrival.replay.requested`
+- `arrival.replay.requested`: 待機到着の通知。主描画機が順序と自身の再生状態を確認して自動開始要求を送るためのもので、受信しただけで再生を始めない
 - `photo.moment.created` / `photo.moment.deleted`: 到着が再生待ち・再生中の場合、`arrivalId`、更新後の全`pathNodeIds`、撮影順の全`photoCheckpoints`を渡す。写真単位のIDは送らず、同じ地点・同時刻の写真がある場合も到着単位で全置換する。到着前の写真変更は`participant.arrived`でまとめて通知する
 - `system.fallback.changed`（運営切替の実装待ち）
 
@@ -374,9 +375,9 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 描画機はクライアント生成`eventId`、対象`arrivalId`、主描画機リースIDを付けて送る。同じ`eventId`は一度だけ適用する。
 
 - `renderer.heartbeat`: fps、現在モード、主系リース、時刻
-- `arrival.replay.started`: 再生開始の確定
+- `arrival.replay.started`: 主描画機の自動開始要求。Backendが主リースと到着状態を検証して開始を確定した応答を返してから再生する
 - `arrival.replay.completed`: 正常完了
-- `arrival.replay.failed`: 失敗理由。サーバーは再試行またはskipを判断する
+- `arrival.replay.failed`: 失敗理由。再生中の描画障害はskipし、自動で再演しない。運営による再試行の条件は別途決定する
 
 WebSocketのping/pongまたはアプリheartbeatを10秒間隔で送り、30秒応答がなければ切断と判定する。最大メッセージサイズ、許容イベント頻度、未知のschemaVersionの扱いを実装設定で固定する。
 

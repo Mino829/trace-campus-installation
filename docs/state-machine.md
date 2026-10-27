@@ -51,7 +51,7 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> Queued: arrival accepted, capacity available
-    Queued --> Playing: primary renderer starts
+    Queued --> Playing: primary renderer automatically requests start
     Queued --> Skipped: participant or operator
     Playing --> Completed: primary renderer completes
     Playing --> Skipped: renderer failure or emergency
@@ -64,16 +64,18 @@ stateDiagram-v2
 | `queued` | 到着済み、再生待ち |
 | `playing` | 主描画機が演出中 |
 | `completed` | 正常終了 |
-| `skipped` | 参加者選択、タイムアウト、障害、運営操作で終了 |
+| `skipped` | 参加者選択、描画障害、運営操作で終了。通常の待機時間だけでは終了させない |
 
 | 現在 | イベント | 次 | サーバー処理 |
 |---|---|---|---|
 | - | `participant.arrived` | `queued` | 到着証明を検証し、キューへ一度だけ追加 |
-| `queued` | `replay.started` | `playing` | 主描画機リースと開始時刻を記録 |
+| `queued` | `replay.started` | `playing` | 到着順に自動送信された開始要求について主描画機リース・状態を検証し、開始時刻を記録する |
 | `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
 | `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
 待機中の`queued`は先入れ先出しとし、通常の混雑では順番を待って再生する。30秒経過だけを理由にskipしない。待機件数の上限、満杯時の受付および障害・閉場時の整理方法は未決。同じセッションの再送は二重登録しない。既存Backend Draft PR #34の10件・30秒上限とは異なり、実装変更が必要である。
+
+通常開始に運営者の操作は不要。主描画機は前の演出が終了してから次の待機到着の開始を要求し、Backendの開始確定を受けて再生する。待機描画機は開始できず、完了済み・スキップ済みの到着を通常の自動開始へ戻さない。障害後の再試行は別途決定する。
 
 `playing`中は描画機が到着QRを非表示にする。これは新規到着の拒否や発行済みQRの失効ではなく、有効なQRによる到着は`playing`中も受け付けて順番を待つ。演出が終了したら有効なQRを再表示する。表示切替はFrontend側の設計目標で、現地検証は未実施。
 
