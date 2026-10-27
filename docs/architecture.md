@@ -96,27 +96,7 @@ MVPではGo Backendを単一の主インスタンスとして開始し、セッ�
 
 ## 主要イベント
 
-描画PCへ送るイベントは、スナップショットと差分でpointId列の変化とphotosの追加を配信する。
-
-```json
-{
-  "schemaVersion": 2,
-  "eventId": "event-id",
-  "type": "participant.arrived",
-  "occurredAt": "ISO-8601",
-  "campusGraphVersion": "graph-2026-01",
-  "threeDMapVersion": "map-2026-01",
-  "data": {
-    "arrivalId": "arrival-id",
-    "pointIds": ["checkpoint-…", "…"],
-    "photos": [
-      {"pointId": "checkpoint-…", "capturedAt": "ISO-8601"}
-    ]
-  }
-}
-```
-
-描画クライアントへ原写真、画像URL、生の座標・GPS、MemorySession IDを送らない。通信契約の正本は[API・WebSocket仕様](api.md)とする。
+描画PCにはスナップショットと差分で経路の点ID列・写真地点/撮影時刻の変化を配信する。原写真、画像URL、生の座標・GPS、PhotoMoment ID、MemorySession ID、色・記号による照合情報は含めない。版、フィールド名とpayload例は[API・WebSocket仕様](api.md#描画websocket)を正本とし、ここでは重複定義しない。
 
 ## セキュリティ境界
 

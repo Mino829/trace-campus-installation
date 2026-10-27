@@ -315,7 +315,9 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 
 ### `GET /v1/display/ws`
 
-短期の描画トークンで認証する。描画PCはthree.jsで描画し、Frontendリポジトリ`/display`がそのまま描画クライアントである（正式採用、Issue #12）。描画PCはGo（Cloud Run）へ外向きWebSocketで直接接続し、Workerは中継しない。接続直後に現在状態のスナップショットを送信し、その後に差分イベントを配信する。到着演出を進める主描画機は同時に一台だけリースを取得できる。待機描画機はスナップショットと通常表示を受信できるが、演出完了を確定できない。
+短期の描画トークンで認証する。描画PCはthree.jsで描画し、Frontendリポジトリ`/display`がそのまま描画クライアントである（正式採用、Issue #12）。描画PCのブラウザからGo（Cloud Run）へ外向きWebSocketで直接接続し、Worker・会場PC上のagentは中継しない。接続直後に現在状態のスナップショットを送信し、その後に差分イベントを配信する。到着演出を進める主描画機は同時に一台だけリースを取得できる。待機描画機はスナップショットと通常表示を受信できるが、演出完了を確定できない。
+
+ブラウザの標準`WebSocket` APIは現Backendが接続時に要求する`Authorization`と版の独自HTTPヘッダーを設定できない。直接接続を選んだことは、ブラウザ認証が実装済みという意味ではない。運営者本人確認、短期資格の発行・失効・更新、ブラウザで使える接続時認証、版照合、接続元制限、自動再接続の契約は設計Issue #11とFrontend #36で確定し、疎通・拒否試験まで描画WSSを一般公開しない。本人確認方式は展示接続時まで保留する。
 
 描画へ渡すデータは、グラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻のみである。原写真、画像URL、生座標、生GPSは渡さない（2026-10-26決定、#23）。`campusGraphVersion`等の版が不一致のイベントは破棄し、直前互換版へ戻す。
 
@@ -328,7 +330,7 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
   "eventId": "event-id",
   "type": "display.snapshot",
   "occurredAt": "2026-07-13T12:00:05Z",
-  "data": {}
+  "data": {"cursor": 0, "arrivals": []}
 }
 ```
 
@@ -337,32 +339,33 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 ```json
 {
   "schemaVersion": 1,
+  "coordinateVersion": "campus-2026-01",
   "campusGraphVersion": "graph-2026-01",
+  "threeDMapVersion": "map-2026-01",
   "eventId": "event-id",
   "type": "participant.arrived",
   "occurredAt": "2026-07-13T12:20:00Z",
   "data": {
     "arrivalId": "arrival-id",
-    "sessionId": "anonymous-id",
+    "replayStatus": "queued",
     "pathNodeIds": ["node-1", "node-2", "node-3", "node-4", "node-shibalab"],
     "photoCheckpoints": [
-      {"photoMomentId": "photo-moment-id", "checkpointId": "checkpoint-main-plaza", "capturedAt": "2026-07-13T12:05:00Z"}
+      {"checkpointId": "checkpoint-main-plaza", "capturedAt": "2026-07-13T12:05:00Z"}
     ],
     "replayDurationSeconds": 15
   }
 }
 ```
 
-`pathNodeIds`は最後の写真からShibaLab（到着）までを含む点IDの並びである。再生時間は全体10〜20秒で区間長に比例配分し、写真地点で少し停止する。`photoCheckpoints`は撮影順である。
+`pathNodeIds`は写真の撮影順に対応する経路を連結し、最後の写真からShibaLab（到着）までの区間も含む点IDの並びである。再生時間は全体10〜20秒（現Backendの投影値は15秒）で、区間長に比例配分し写真地点で少し停止する描画はFrontend側の未統合事項。`photoCheckpoints`は撮影順。写真0枚、旧方式の写真、Graph版不一致、区間欠損時には描画用の経路を空にし、旧GPS由来の点を新方式へ混ぜない。描画データにはPhotoMoment ID、MemorySession ID、色・記号などの照合情報を含めない。
 
 ### サーバーから描画機へのその他のイベント
 
 - `arrival.replay.requested`
-- `photo.moment.created`: 写真ごとの`checkpointId`と撮影時刻だけを含む
-- `photo.moment.deleted`
-- `system.fallback.changed`
+- `photo.moment.created` / `photo.moment.deleted`: 到着が再生待ち・再生中の場合、`arrivalId`、更新後の全`pathNodeIds`、撮影順の全`photoCheckpoints`を渡す。写真単位のIDは送らず、同じ地点・同時刻の写真がある場合も到着単位で全置換する。到着前の写真変更は`participant.arrived`でまとめて通知する
+- `system.fallback.changed`（運営切替の実装待ち）
 
-旧`position.updated`、`tracking.stopped`、写真ピン・フォトスポット系イベント（`photo.marker.*`、`photo.hotspot.*`）は廃止した（2026-10-26決定、#23）。
+旧`position.updated`、`position.expired`、`tracking.stopped`、Live位相イベント、写真ピン・フォトスポット系イベント（`photo.marker.*`、`photo.hotspot.*`）は廃止した（2026-10-26決定、#23）。旧Liveの本人照会と削除は保持期限まで続けるが、描画用snapshotの`participants`と位置差分は返さない。
 
 ### 描画機からサーバーへのメッセージ
 
