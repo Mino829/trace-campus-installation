@@ -51,9 +51,8 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> Queued: arrival accepted, capacity available
-    [*] --> Skipped: arrival accepted, queue full
     Queued --> Playing: primary renderer starts
-    Queued --> Skipped: participant, timeout, operator
+    Queued --> Skipped: participant or operator
     Playing --> Completed: primary renderer completes
     Playing --> Skipped: renderer failure or emergency
     Completed --> [*]
@@ -74,7 +73,9 @@ stateDiagram-v2
 | `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
 | `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
-待機中の`queued`は最大10件、先入れ先出しとする。到着受付のサーバー時刻から30秒以内に主描画機が再生開始を確定しなければ`timeout`で`skipped`にする。写真`pending`の待機はこの上限内に含める。満杯でも到着イベントとセッションの`arrived`は確定し、`queue_full`で直ちに`skipped`とする。キューの枠判定と到着イベント登録は原子的に行い、同じセッションの再送は既存イベントを返す。`skipped`と`completed`を再登録せず、描画機の再接続でも演出を自動再開しない。
+待機中の`queued`は先入れ先出しとし、通常の混雑では順番を待って再生する。30秒経過だけを理由にskipしない。待機件数の上限、満杯時の受付および障害・閉場時の整理方法は未決。同じセッションの再送は二重登録しない。既存Backend Draft PR #34の10件・30秒上限とは異なり、実装変更が必要である。
+
+`playing`中は描画機が到着QRを非表示にする。これは新規到着の拒否や発行済みQRの失効ではなく、有効なQRによる到着は`playing`中も受け付けて順番を待つ。演出が終了したら有効なQRを再表示する。表示切替はFrontend側の設計目標で、現地検証は未実施。
 
 再生データはグラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻である。経路は写真を撮った順に各写真の地点をCampusGraph最短経路でつなぎ、最後の写真からShibaLab（到着）までの区間も同じ線で描く。再生は全体10〜20秒、区間の長さに比例配分、写真地点で少し停止する。
 
@@ -95,8 +96,7 @@ stateDiagram-v2
 
 ## 異常系
 
-- 描画機が接続されていない場合も到着を受け付け、待機10件以内で保持する。満杯時は到着だけを成立させ演出を`queue_full`でskipする
-- 到着受付から30秒以内に再生を開始できなければ`timeout`で`skipped`とし、通常展示を継続する
+- 描画機が接続されていない場合の待機・復旧・受付停止の扱いは未決。通常の混雑と機器障害を区別して公開前に決める
 - 端末時刻が不正でも、到着はサーバー受信時刻とQRの署名・有効期限を正とする
 - 主描画機が再生中に切断した場合は演出を`skipped`にし、同じ到着を別端末で自動再開しない
 - 参加者が再生前に削除した場合はキューから除外し、描画機へ停止イベントを送る

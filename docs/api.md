@@ -144,7 +144,9 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: 
 
 Backendは本人Bearerと有効なMemorySessionを確認し、サーバー時刻で署名・用途・鍵ID・発行時刻・有効期限・会場・到着用`checkpointId`を検証する。`clientTime`は判定に使用しない。不正な証明は`400 INVALID_ARRIVAL_PROOF`で拒否し、ArrivalEventを作成しない。到着済みの同じMemorySessionの再送は、QR期限後も本人資格で既存のArrivalEventと現在の`replay_status`を返し、二重到着・二重キュー登録をしない。投影QRは複数人が見られるため、QRのランダム値を全参加者で一度限りとみなすことはできない。別セッションによる有効期間内の読み取りや撮影済みQRの遠隔使用を署名だけで防げない点はPS-005・R-05の未解決リスクであり、公開前に責任者と対策を決める。
 
-有効な初回到着は写真枚数にかかわらずArrivalEventを1件作り、MemorySessionを`arrived`へ変更して撮影通知を停止する。写真0枚・1枚は簡易表示とする（#23）。演出の待機キューは同時最大10件（`queued`のみを数え、`playing`は含まない）、受付から再生開始まで最大30秒とし、到着受付・容量判定・キュー登録を競合下でも原子的に確定する。満杯時も到着は成功し、ArrivalEventの`replay_status=skipped`、`skip_reason=queue_full`を返す。30秒以内に再生を開始できなければ`skip_reason=timeout`で`skipped`へ進める。`pending`写真の短い待機もこの30秒に含め、写真の有無で到着を拒否しない。キューに並べられなかった参加者にも本人用ストーリーと削除は提供する。`status`はArrivalEventの現在の`replay_status`（`queued`、`playing`、`completed`、`skipped`）であり、再読込時は状態取得APIから復元する。これらは実装目標であり、実機・負荷試験（#15）の合格を意味しない。
+有効な初回到着は写真枚数にかかわらずArrivalEventを1件作り、撮影通知を停止する。写真0枚・1枚は簡易表示とする（#23）。通常は到着順に演出を待ち、30秒を超えたことだけを理由にskipしない方針とする。待機が10件に達するほどの混雑は通常想定しないが、待機可能件数・満杯時の受付と、障害・閉場時の扱いは未決。`status`はArrivalEventの現在の`replay_status`（`queued`、`playing`、`completed`、`skipped`）であり、再読込時は状態取得APIから復元する。既存のBackend Draft PR #34は待機10件・30秒超過でskipするため、この方針と一致せず変更が必要である。公開・実機試験済みを意味しない。
+
+描画機は参加者の演出を再生している間、展示画面の到着QRを非表示にする。非表示は到着受付の停止やQRの失効を意味しない。直前に読んだQRなど、有効な証明で再生中に届いた到着も検証・受付し、順番を待つ。再生終了後、展示画面は有効な到着QRを再表示する。短期QRでも撮影済みの値の期限内利用は防げないため、非表示だけを不正利用対策とみなさない。展示画面の実装・実機確認はFrontend #36で行う。
 
 ## データ削除
 
@@ -295,7 +297,7 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 ```
 
 旧Backend #6の写真実装では、`photoSummary`の`ready`/`pending`/`failed`を旧クラウド写真のMemorySession実件数から算出し、`maxCount`は12とする。`deleting`は旧写真一覧から確認し、保持中の上限には含める。この旧例の`ready`は新しい端末限定写真の存在・内容をBackendが検証したことを意味しない。新方式の本人画面は`GET /v2/.../photos`でメタデータを照会し、画像の有無は同じ端末内で判定する。`status`は`main`、`arrived`、`ended`のいずれか（[状態遷移](state-machine.md)参照）。通知・到着キュー・新写真APIの未実装項目はこの例に登場するだけで提供済みとみなさない。
-`replayStatus`はArrivalEventの現在状態であり、キュー満杯・30秒の待機超過時も`skipped`を返す。到着がまだ成立していない場合は`null`とする。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。ただし新方式の画像は同じブラウザ内に残る場合に限り閲覧でき、旧写真の本人取得・削除は各`deleteAfter`まで維持する。
+`replayStatus`はArrivalEventの現在状態であり、到着前は`null`とする。通常の待機時間だけではskipしない方針だが、満杯・障害時の取扱いと既存Backendとの差分は未解決。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。ただし新方式の画像は同じブラウザ内に残る場合に限り閲覧でき、旧写真の本人取得・削除は各`deleteAfter`まで維持する。
 
 ## 運営API
 
