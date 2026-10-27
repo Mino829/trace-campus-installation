@@ -51,9 +51,8 @@ stateDiagram-v2
 ```mermaid
 stateDiagram-v2
     [*] --> Queued: arrival accepted, capacity available
-    [*] --> Skipped: arrival accepted, queue full
-    Queued --> Playing: primary renderer starts
-    Queued --> Skipped: participant, timeout, operator
+    Queued --> Playing: primary renderer automatically requests start
+    Queued --> Skipped: participant or operator
     Playing --> Completed: primary renderer completes
     Playing --> Skipped: renderer failure or emergency
     Completed --> [*]
@@ -65,16 +64,20 @@ stateDiagram-v2
 | `queued` | 到着済み、再生待ち |
 | `playing` | 主描画機が演出中 |
 | `completed` | 正常終了 |
-| `skipped` | 参加者選択、タイムアウト、障害、運営操作で終了 |
+| `skipped` | 参加者選択、描画障害、運営操作で終了。通常の待機時間だけでは終了させない |
 
 | 現在 | イベント | 次 | サーバー処理 |
 |---|---|---|---|
 | - | `participant.arrived` | `queued` | 到着証明を検証し、キューへ一度だけ追加 |
-| `queued` | `replay.started` | `playing` | 主描画機リースと開始時刻を記録 |
+| `queued` | `replay.started` | `playing` | 到着順に自動送信された開始要求について主描画機リース・状態を検証し、開始時刻を記録する |
 | `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
 | `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
-待機中の`queued`は最大10件、先入れ先出しとする。到着受付のサーバー時刻から30秒以内に主描画機が再生開始を確定しなければ`timeout`で`skipped`にする。写真`pending`の待機はこの上限内に含める。満杯でも到着イベントとセッションの`arrived`は確定し、`queue_full`で直ちに`skipped`とする。キューの枠判定と到着イベント登録は原子的に行い、同じセッションの再送は既存イベントを返す。`skipped`と`completed`を再登録せず、描画機の再接続でも演出を自動再開しない。
+待機中の`queued`は先入れ先出しとし、通常の混雑では順番を待って再生する。30秒経過だけを理由にskipしない。有効なMemorySessionの待機上限は50件（`playing`を除く）で、満杯の新規到着は503の一時エラーとし到着・通知停止を確定しない。空きが戻れば有効QRで再試行する。同じセッションの再送は二重登録しない。MemorySessionの期限切れ・削除は待機を終了させる。Backend Draft PR #36がこの変更を実装し、#34/#35から積み上がっている。閉場時の整理と障害運用は別途確定する。
+
+通常開始に運営者の操作は不要。主描画機は前の演出の完了確定後に終了画面を4秒表示し、その後に次の待機到着の開始を要求する。終了画面中は次を開始せず、待機がなければQR画面へ戻る。終了画面は描画機の表示状態であり、到着状態は`completed`のままとする。待機描画機は開始できず、完了済み・スキップ済みの到着を通常の自動開始へ戻さない。障害後の再試行は別途決定する。
+
+`playing`中と終了画面中は到着QRを非表示にする。これは新規到着の拒否や発行済みQRの失効ではなく、有効なQRによる到着は非表示中も受け付けて順番を待つ。表示切替と終了画面の優先制御はFrontend側の設計目標で、現地検証は未実施。
 
 再生データはグラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻である。経路は写真を撮った順に各写真の地点をCampusGraph最短経路でつなぎ、最後の写真からShibaLab（到着）までの区間も同じ線で描く。再生は全体10〜20秒、区間の長さに比例配分、写真地点で少し停止する。
 
@@ -95,8 +98,7 @@ stateDiagram-v2
 
 ## 異常系
 
-- 描画機が接続されていない場合も到着を受け付け、待機10件以内で保持する。満杯時は到着だけを成立させ演出を`queue_full`でskipする
-- 到着受付から30秒以内に再生を開始できなければ`timeout`で`skipped`とし、通常展示を継続する
+- 描画機が接続されていない場合の待機・復旧・受付停止の扱いは未決。通常の混雑と機器障害を区別して公開前に決める
 - 端末時刻が不正でも、到着はサーバー受信時刻とQRの署名・有効期限を正とする
 - 主描画機が再生中に切断した場合は演出を`skipped`にし、同じ到着を別端末で自動再開しない
 - 参加者が再生前に削除した場合はキューから除外し、描画機へ停止イベントを送る

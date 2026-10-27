@@ -272,7 +272,6 @@ sequenceDiagram
         API->>API: checkpointIdを検証<br/>画像バイト列は受け付けない
         API->>DB: PhotoMoment・地点・撮影時刻を保存
         API->>API: CampusGraphで前回地点からの<br/>最短経路を確定
-        API-->>Renderer: 経路差分（グラフ版＋点ID列）
         API-->>Browser: メタデータ登録の成否
         Browser-->>User: 端末画像と登録結果を区別して表示
     end
@@ -285,20 +284,31 @@ sequenceDiagram
     API-->>Renderer: participant.arrived<br/>写真地点の点ID列・撮影時刻・ShibaLab到着区間
     API-->>Browser: arrivalId・到着状態
     Note over API,DB: 写真0枚でも到着は成立する。<br/>再生は簡易表示へ縮小（2026-10-26決定）
-    Browser-->>User: 完了状態・自動削除予定日時を表示
+    Browser-->>User: 再生準備中・自動削除予定日時を表示
 
-    Operator->>API: GET /v1/operator/status
-    API->>DB: 到着キューと描画機状態を取得
-    DB-->>API: 運営用状態
-    API-->>Operator: キュー・描画機状態
+    opt 運営者による状態確認（自動再生の前提ではない）
+        Operator->>API: GET /v1/operator/status
+        API->>DB: 到着キューと描画機状態を取得
+        DB-->>API: 運営用状態
+        API-->>Operator: キュー・描画機状態
+    end
 
-    Operator->>API: POST /v1/operator/arrivals/{arrivalId}/play
-    API-->>Renderer: arrival.replay.requested<br/>主描画機リース対象のみ
+    API-->>Renderer: arrival.replay.requested<br/>待機到着を通知
+    Note over Renderer: 主描画機が前の演出と終了画面を待ち<br/>到着順に自動で次を開始
     Renderer->>API: arrival.replay.started<br/>eventId・arrivalId・leaseId
+    API->>API: 主リースと到着状態を検証
     API->>DB: replay_statusをplayingへ更新
-    Renderer->>Output: 写真地点を最短経路で繋いだ経路を<br/>10〜20秒・区間長の比例配分で再生
+    API-->>Renderer: renderer.ack<br/>開始確定
+    Renderer->>Output: 到着QRを非表示にし<br/>写真地点の経路を10〜20秒で再生
     Renderer->>API: arrival.replay.completed
     API->>DB: replay_statusをcompletedへ更新
+    API-->>Renderer: renderer.ack<br/>完了確定
+    Renderer->>Output: QRを隠したまま終了画面を4秒表示
+    alt 待機到着がある
+        Note over Renderer: 終了画面の後に次の開始要求へ<br/>QRは表示しない
+    else 待機到着がない
+        Renderer->>Output: 有効な到着QRの画面へ戻る
+    end
 
     Browser->>API: GET /v1/memory-sessions/{id}
     API->>DB: 到着・再生状態を取得
@@ -410,8 +420,8 @@ sequenceDiagram
 
 | 確認事項 | 現在の図での暫定解釈 | 統合前に決めること |
 |---|---|---|
-| 到着演出の開始方法 | 運営者が`POST /v1/operator/arrivals/{arrivalId}/play`を実行して開始する | 毎回手動で開始するか、Backendがキューから自動開始するか |
-| `participant.arrived`と`arrival.replay.requested`の役割 | 到着時に`participant.arrived`で点ID列・撮影時刻を渡し、再生時に`arrival.replay.requested`を送る | 軌跡を受けた描画機が何をするか、差分とスナップショットの分担 |
+| 到着演出の開始方法 | 主描画機が前の演出の終了後に到着順で自動開始要求を送り、Backendがリースと状態を確定する | 通常開始に運営操作は不要。障害後の再試行などは別途確定 |
+| `participant.arrived`と`arrival.replay.requested`の役割 | 到着時に経路を渡し、待機を通知する。主描画機が待機順に処理する | 差分欠落時はsnapshotで復元し、完了済み演出を自動再演しない |
 | 参加者画面の状態更新 | `GET /v1/memory-sessions/{id}`で到着状態・削除予定日時を、`GET /v2/memory-sessions/{id}/photos`でサーバーメタデータを取得する。端末写真の有無はIndexedDBで判定 | ポーリング間隔、画面更新方法、参加者向け通知を追加するか |
 | チェックポイント選択UIの粒度 | 図では3Dマップ上の一覧選択（実装PRは82点）と表記 | ポケモンGO風8か所スポット案との採否、写真地点の再選択（選び直し）の可否。uni-bit・code-yutoと相談中（Mino829/TRACE_F#38・#45） |
 | 主描画機リース | 主描画機だけが再生開始・完了を送れるものとしている | リースの取得方法、有効時間、更新、切断時の解放、待機機への切替手順 |

@@ -194,7 +194,7 @@ erDiagram
 - `source`: `qr`。到着は有効な展示ブースQRでのみ成立する
 - `replay_status`: `queued`、`playing`、`completed`、`skipped`
 - `checkpoint_id`: 到着場所（ShibaLab）の識別子。署名付き証明そのものは保存しない
-- `skip_reason`: `queue_full`、`timeout`、`participant_request`、`renderer_failure`、`operator`。待機キューは最大10件、到着から30秒以内に開始できない場合はskipする
+- `skip_reason`: 参加者選択・描画機障害・運営操作・削除など。待機50件の満杯時は新たなArrivalEventを作らず一時エラーとする。通常待機30秒ではskipしない。過去の`queue_full`・`timeout`によるskipは履歴として保持し自動再演しない。Backend Draft PR #36のmigration013で`replay_deadline`を撤去し、部分一意indexで全体の`playing`最大1件を保証する。旧migration012を未適用の環境は待機・再生を空にしてから移行する
 
 到着は展示ブースで投影・定期更新する署名・期限付きQRのBackend検証でのみ成立する（2026-10-26決定、#11）。受付ではMemorySessionへArrivalEventを作成し、`status`を`arrived`へ変更して撮影通知を停止する。写真0枚・1枚でも到着は成立する（2026-10-26決定、#23）。再生状態はArrivalEventだけを正とし、MemorySessionへ`replaying`を重複保存しない。
 

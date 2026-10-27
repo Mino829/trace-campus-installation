@@ -144,7 +144,13 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: 
 
 Backendは本人Bearerと有効なMemorySessionを確認し、サーバー時刻で署名・用途・鍵ID・発行時刻・有効期限・会場・到着用`checkpointId`を検証する。`clientTime`は判定に使用しない。不正な証明は`400 INVALID_ARRIVAL_PROOF`で拒否し、ArrivalEventを作成しない。到着済みの同じMemorySessionの再送は、QR期限後も本人資格で既存のArrivalEventと現在の`replay_status`を返し、二重到着・二重キュー登録をしない。投影QRは複数人が見られるため、QRのランダム値を全参加者で一度限りとみなすことはできない。別セッションによる有効期間内の読み取りや撮影済みQRの遠隔使用を署名だけで防げない点はPS-005・R-05の未解決リスクであり、公開前に責任者と対策を決める。
 
-有効な初回到着は写真枚数にかかわらずArrivalEventを1件作り、MemorySessionを`arrived`へ変更して撮影通知を停止する。写真0枚・1枚は簡易表示とする（#23）。演出の待機キューは同時最大10件（`queued`のみを数え、`playing`は含まない）、受付から再生開始まで最大30秒とし、到着受付・容量判定・キュー登録を競合下でも原子的に確定する。満杯時も到着は成功し、ArrivalEventの`replay_status=skipped`、`skip_reason=queue_full`を返す。30秒以内に再生を開始できなければ`skip_reason=timeout`で`skipped`へ進める。`pending`写真の短い待機もこの30秒に含め、写真の有無で到着を拒否しない。キューに並べられなかった参加者にも本人用ストーリーと削除は提供する。`status`はArrivalEventの現在の`replay_status`（`queued`、`playing`、`completed`、`skipped`）であり、再読込時は状態取得APIから復元する。これらは実装目標であり、実機・負荷試験（#15）の合格を意味しない。
+有効な初回到着は写真枚数にかかわらずArrivalEventを1件作り、撮影通知を停止する。写真0枚・1枚は簡易表示とする（#23）。通常は到着順に演出を待ち、30秒を超えたことだけを理由にskipしない。有効なMemorySessionの`queued`は安全上限50件とし、`playing`は含めない。満杯の新規到着は`503 ARRIVAL_QUEUE_FULL`と`Retry-After: 5`を返し、到着・通知停止・冪等応答記録を確定しない。空きが戻りQRが有効なら同じ内容とキーで再試行できる。QR期限切れなら再読取して新しい内容とキーで送る。既存の待機者は維持するが、MemorySessionの期限切れ・本人削除は待機を終了させる。障害・閉場時の運用は別途確定する。`status`はArrivalEventの現在の`replay_status`であり、再読込時は状態取得APIから復元する。[Backend Draft PR #36](https://github.com/Mino829/TRACE_B/pull/36)でこのキューと単一再生・FIFO開始検証を実装し、ローカルHTTP/WSで確認済み。main統合・配備・Frontend結合・実機試験済みを意味しない。
+
+描画機は参加者の演出中と、その後の終了画面では到着QRを非表示にする。非表示は到着受付の停止やQRの失効を意味しない。直前に読んだQRなど、有効な証明で再生中に届いた到着も検証・受付し、順番を待つ。短期QRでも撮影済みの値の期限内利用は防げないため、非表示だけを不正利用対策とみなさない。
+
+通常の再生開始は自動とする。主描画機は待機中の到着を到着順に選び、前の演出と終了画面が終わって再生可能になったら開始要求を送る。Backendが主リースと到着状態を検証して`playing`を確定した後に再生する。運営者の毎回の開始操作を前提としない。運営による障害後の再試行・強制操作は通常開始とは別の契約として確定する。
+
+正常な再生完了をBackendが確定したら終了画面を4秒表示する（既存Frontendの表示時間を採用）。終了画面はFrontend内の表示状態であり、ArrivalEventに新しい状態を追加しない。終了画面中は次の開始要求を送らない。4秒後に待機があれば次を自動開始し、待機がなければ有効なQRを表示する画面へ戻る。Frontendには終了画面があるが、次の待機再生が表示を中断し得るため、この優先順の実装と実機確認はFrontend #36で必要である。
 
 ## データ削除
 
@@ -295,7 +301,7 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 ```
 
 旧Backend #6の写真実装では、`photoSummary`の`ready`/`pending`/`failed`を旧クラウド写真のMemorySession実件数から算出し、`maxCount`は12とする。`deleting`は旧写真一覧から確認し、保持中の上限には含める。この旧例の`ready`は新しい端末限定写真の存在・内容をBackendが検証したことを意味しない。新方式の本人画面は`GET /v2/.../photos`でメタデータを照会し、画像の有無は同じ端末内で判定する。`status`は`main`、`arrived`、`ended`のいずれか（[状態遷移](state-machine.md)参照）。通知・到着キュー・新写真APIの未実装項目はこの例に登場するだけで提供済みとみなさない。
-`replayStatus`はArrivalEventの現在状態であり、キュー満杯・30秒の待機超過時も`skipped`を返す。到着がまだ成立していない場合は`null`とする。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。ただし新方式の画像は同じブラウザ内に残る場合に限り閲覧でき、旧写真の本人取得・削除は各`deleteAfter`まで維持する。
+`replayStatus`はArrivalEventの現在状態であり、到着前は`null`を設計目標とする（現Backendは空文字）。通常の待機時間だけではskipしない。満杯時に到着が未確定の人は受付済みとして表示せず、再試行を案内する。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。ただし新方式の画像は同じブラウザ内に残る場合に限り閲覧でき、旧写真の本人取得・削除は各`deleteAfter`まで維持する。
 
 ## 運営API
 
@@ -303,7 +309,6 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 - `POST /v1/operator/arrivals/{arrivalId}/skip`: 到着演出をスキップ
 - `POST /v1/operator/fallback`: 自律映像へ切り替え
 - `POST /v1/operator/registration/close`: 新規参加受付を停止
-- `POST /v1/operator/arrivals/{arrivalId}/play`: 主描画機へ再生を指示
 - `POST /v1/operator/notifications/stop`: 全撮影通知を停止
 - `GET /health/live`: プロセスの生存確認
 - `GET /health/ready`: DBと必要サービスの準備確認
@@ -361,7 +366,7 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 
 ### サーバーから描画機へのその他のイベント
 
-- `arrival.replay.requested`
+- `arrival.replay.requested`: 待機到着の通知。主描画機が順序と自身の再生状態を確認して自動開始要求を送るためのもので、受信しただけで再生を始めない
 - `photo.moment.created` / `photo.moment.deleted`: 到着が再生待ち・再生中の場合、`arrivalId`、更新後の全`pathNodeIds`、撮影順の全`photoCheckpoints`を渡す。写真単位のIDは送らず、同じ地点・同時刻の写真がある場合も到着単位で全置換する。到着前の写真変更は`participant.arrived`でまとめて通知する
 - `system.fallback.changed`（運営切替の実装待ち）
 
@@ -372,9 +377,9 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 描画機はクライアント生成`eventId`、対象`arrivalId`、主描画機リースIDを付けて送る。同じ`eventId`は一度だけ適用する。
 
 - `renderer.heartbeat`: fps、現在モード、主系リース、時刻
-- `arrival.replay.started`: 再生開始の確定
+- `arrival.replay.started`: 主描画機の自動開始要求。Backendが主リースと到着状態を検証して開始を確定した応答を返してから再生する
 - `arrival.replay.completed`: 正常完了
-- `arrival.replay.failed`: 失敗理由。サーバーは再試行またはskipを判断する
+- `arrival.replay.failed`: 失敗理由。再生中の描画障害はskipし、自動で再演しない。運営による再試行の条件は別途決定する
 
 WebSocketのping/pongまたはアプリheartbeatを10秒間隔で送り、30秒応答がなければ切断と判定する。最大メッセージサイズ、許容イベント頻度、未知のschemaVersionの扱いを実装設定で固定する。
 
