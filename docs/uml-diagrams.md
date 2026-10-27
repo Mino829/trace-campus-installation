@@ -294,7 +294,7 @@ sequenceDiagram
     end
 
     API-->>Renderer: arrival.replay.requested<br/>待機到着を通知
-    Note over Renderer: 主描画機が前の演出の終了を待ち<br/>到着順に自動で次を開始
+    Note over Renderer: 主描画機が前の演出と終了画面を待ち<br/>到着順に自動で次を開始
     Renderer->>API: arrival.replay.started<br/>eventId・arrivalId・leaseId
     API->>API: 主リースと到着状態を検証
     API->>DB: replay_statusをplayingへ更新
@@ -303,7 +303,12 @@ sequenceDiagram
     Renderer->>API: arrival.replay.completed
     API->>DB: replay_statusをcompletedへ更新
     API-->>Renderer: renderer.ack<br/>完了確定
-    Renderer->>Output: 有効な到着QRを再表示<br/>次の待機があれば自動再生へ
+    Renderer->>Output: QRを隠したまま終了画面を4秒表示
+    alt 待機到着がある
+        Note over Renderer: 終了画面の後に次の開始要求へ<br/>QRは表示しない
+    else 待機到着がない
+        Renderer->>Output: 有効な到着QRの画面へ戻る
+    end
 
     Browser->>API: GET /v1/memory-sessions/{id}
     API->>DB: 到着・再生状態を取得
