@@ -8,7 +8,8 @@
 - 形式: `application/json`
 - 時刻: UTCのISO 8601
 - 参加者認証: セッション作成時に発行するBearer token
-- 運営・描画認証: 参加者用とは別の短期トークンを使う。発行者認証、ブラウザへの受け渡し、失効・ローテーションと公開経路は未決（設計Issue #11）。長期鍵をブラウザ、URL、Workerへ配布しない。発行契約が確定するまで運営API・描画WSSを本番公開しない
+- 描画認証: Googleログイン＋運営メール許可リストを採用。Google IDトークンからOrigin束縛の短期描画資格を発行し、WSの最初のメッセージで資格と版を照合する。詳細は[描画WebSocket](#描画websocket)。長期署名鍵をブラウザ、URL、Workerへ配布しない
+- その他の運営認証: 参加者・描画用とは別の権限と資格を使う。発行・失効・監査・公開経路は設計Issue #11で継続し、描画資格だけで一般の運営操作を認めない
 - 到着・削除操作は冪等にする
 - GPS（Geolocation API、`watchPosition`、撮影時位置取得）は使用しない。写真地点は参加者が3Dマップで選択した`checkpointId`のみで、座標・対応ノードIDの解決はBackendが行う。クライアントpayloadに座標・ノードID・グラフ版を追加しない（2026-10-26決定、#23）
 - セッションは写真用`MemorySession`単独とする。`LivePresenceSession`の新規発行は行わない（2026-10-26決定、#23）
@@ -140,7 +141,7 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: 
 }
 ```
 
-到着は、展示ブースのプロジェクター映像に表示し定期更新する署名・期限付きQR（用途、`checkpointId`、会場、発行時刻、有効期限、ランダム値、署名鍵ID）のBackend検証でのみ成立する（2026-10-26決定、#11）。Backendだけが署名鍵を保持して到着証明を発行し、会場の投影装置は発行済みQRを表示する。発行要求元の認証経路は運営・描画資格の発行契約とともに未決であり、公開APIから無認証で発行してはならない。QRの有効期間と更新間隔は実機試験で決める。参加者は展示ブースの列に並び、自分の番でWeb App内のカメラから読む。待ち順は人の列で扱い、参加端末へ順位・予想待ち時間・色・記号を返さない。
+到着は、展示ブースのプロジェクター映像に表示し定期更新する署名・期限付きQR（用途、`checkpointId`、会場、発行時刻、有効期限、ランダム値、署名鍵ID）のBackend検証でのみ成立する（2026-10-26決定、#11）。Backendだけが署名鍵を保持して到着証明を発行し、会場の投影装置は発行済みQRを表示する。発行要求元の本番認証経路は描画トークンとは別に保留中であり、公開APIから無認証で発行してはならない。QRの有効期間と更新間隔は実機試験で決める。参加者は展示ブースの列に並び、自分の番でWeb App内のカメラから読む。待ち順は人の列で扱い、参加端末へ順位・予想待ち時間・色・記号を返さない。
 
 Backendは本人Bearerと有効なMemorySessionを確認し、サーバー時刻で署名・用途・鍵ID・発行時刻・有効期限・会場・到着用`checkpointId`を検証する。`clientTime`は判定に使用しない。不正な証明は`400 INVALID_ARRIVAL_PROOF`で拒否し、ArrivalEventを作成しない。到着済みの同じMemorySessionの再送は、QR期限後も本人資格で既存のArrivalEventと現在の`replay_status`を返し、二重到着・二重キュー登録をしない。投影QRは複数人が見られるため、QRのランダム値を全参加者で一度限りとみなすことはできない。別セッションによる有効期間内の読み取りや撮影済みQRの遠隔使用を署名だけで防げない点はPS-005・R-05の未解決リスクであり、公開前に責任者と対策を決める。
 
@@ -314,15 +315,42 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 - `GET /health/ready`: DBと必要サービスの準備確認
 
 運営APIを参加者向け公開経路から分離する。受付停止、skip、再生、fallbackの操作は操作者、時刻、対象、結果を監査ログへ残す。監査ログに位置情報を含めない。写真ピン・フォトスポット停止APIは廃止した（2026-10-26決定、#23）。
-描画・運営資格情報の発行経路は設計Issue #11で保留中。既存の「短期トークン」「外向きWSS」は資格情報をブラウザで安全に発行・保管できることを保証しない。発行者・配送経路・スコープ・有効期限・失効・監査・参加者経路との分離がレビューで確定するまで、本番の運営/描画入口を開放しない（Backend #9/#11）。到着QRの発行入口も同じ判断を要する。
+描画資格の発行はGoogleログイン＋許可リストに決定し、下記の専用APIを用いる。この資格で受付停止・到着QR発行・skip・fallback等を行う権限は与えない。それら運営資格の発行・失効・監査と公開経路は設計Issue #11で継続し、本番の運営入口は開放しない（Backend #11）。描画の方式決定も大学の公開承認やFrontend統合完了を意味しない。
 
 ## 描画WebSocket
 
+### `POST /v1/operator/display-tokens`
+
+運営者の本人確認はGoogleログイン＋メール許可リストを採用する（依頼者選択）。展示ブラウザはGoogle IDトークンを`Authorization: Bearer <Google ID token>`へ設定し、Backendへ直接、空bodyで送る。単一のOriginが展示用許可リストと完全一致することを要求する。GoogleのRS256署名・WebクライアントIDに一致するaud・Google issuer・期限・発行時刻・sub・`email_verified`と、存在する場合のazpを検証する。許可リストは完全なメールアドレス単位で、Googleが現在の所有者を保証するGmailかWorkspace（署名済みhdあり）に限る。外部メールを登録しただけのGoogleアカウントは拒否する（[Googleの指針](https://developers.google.com/identity/sign-in/web/backend-auth)）。
+
+成功は200で`displayToken`と`expiresAt`を返す。描画資格は用途とOriginに束縛し2分有効、Googleのメール・subは含めない。Google IDトークンと描画資格はブラウザのメモリだけに保持し、URL・query・subprotocol・永続ストレージ・ログ・QRへ載せない。署名鍵はBackendのSecret Manager設定だけに置く。参加者/描画資格、旧HMAC発行ヘッダー、複数Authorizationは401、許可外/欠落Originは403、query/bodyは400、機能無効は503、認証前のIP/全体レート制限は429/Retry-Afterとする。
+
+設定は`TRACE_DISPLAY_GOOGLE_CLIENT_ID`、`TRACE_DISPLAY_OPERATOR_EMAILS`、`TRACE_DISPLAY_ALLOWED_ORIGINS`、独立した`TRACE_DISPLAY_TOKEN_KEY`。リストはカンマ区切り・wildcardなし。OriginはHTTPS、開発時だけlocalhost/127.0.0.1のHTTPを認める。Google OAuth側にも展示ページのJavaScript Originを登録する。旧`TRACE_DISPLAY_ISSUER_KEY`は廃止する。
+
 ### `GET /v1/display/ws`
 
-短期の描画トークンで認証する。描画PCはthree.jsで描画し、Frontendリポジトリ`/display`がそのまま描画クライアントである（正式採用、Issue #12）。描画PCのブラウザからGo（Cloud Run）へ外向きWebSocketで直接接続し、Worker・会場PC上のagentは中継しない。接続直後に現在状態のスナップショットを送信し、その後に差分イベントを配信する。到着演出を進める主描画機は同時に一台だけリースを取得できる。待機描画機はスナップショットと通常表示を受信できるが、演出完了を確定できない。
+短期の描画トークンで認証する。描画PCはthree.jsで描画し、Frontendリポジトリ`/display`がそのまま描画クライアントである（正式採用、Issue #12）。描画PCのブラウザからGo（Cloud Run）へ外向きWebSocketで直接接続し、Worker・会場PC上のagentは中継しない。最初の認証に成功してから現在状態のスナップショットを送信し、その後に差分イベントを配信する。到着演出を進める主描画機は同時に一台だけリースを取得できる。待機描画機はスナップショットと通常表示を受信できるが、演出完了を確定できない。
 
-ブラウザの標準`WebSocket` APIは現Backendが接続時に要求する`Authorization`と版の独自HTTPヘッダーを設定できない。直接接続を選んだことは、ブラウザ認証が実装済みという意味ではない。運営者本人確認、短期資格の発行・失効・更新、ブラウザで使える接続時認証、版照合、接続元制限、自動再接続の契約は設計Issue #11とFrontend #36で確定し、疎通・拒否試験まで描画WSSを一般公開しない。本人確認方式は展示接続時まで保留する。
+ブラウザ標準の`WebSocket` APIで接続し、5秒以内に最初のテキストメッセージとして次を送る。独自HTTPヘッダーによる旧native認証は廃止し、Google IDトークンそのものをWSへ送らない。HTTP Upgradeは認証成功を意味せず、最初の`display.snapshot`受信を認証成功として扱う。
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "renderer.authenticate",
+  "displayToken": "<issued-display-token>",
+  "coordinateVersion": "campus-2026-01",
+  "campusGraphVersion": "graph-2026-01",
+  "threeDMapVersion": "map-2026-01"
+}
+```
+
+認証前にsnapshot・差分・リースは渡さない。最初のメッセージは16KiB以下、資格の署名・用途・期限・Originと全版を照合する。未認証/不正資格はclose 4401、版不一致は4409、サイズ超過は1009。欠落/許可外Origin、query、旧Authorizationヘッダー付き接続はHTTP 403で拒否する。接続試行にもIP/全体のレート制限を適用する。
+
+描画資格発行と描画WSの2経路だけはEdge共有secretを要求せず、専用Origin許可リストを用いる。その他の運営APIと参加者の`/v1`・`/v2`は既存のEdge保護を維持する。Cloud Run IAMは別の境界であり、この実装でIAM非公開サービスへ直接接続できるわけではない。
+
+再接続時は有効なGoogle IDトークンで描画資格を再発行し、Googleの資格が期限切れなら再認証する。WS接続自体の上限は50分。許可リスト更新後に旧APIを停止・置換すると新規発行を拒否するが、既発行資格は最大2分、認証済み接続は最大50分残り得る。緊急時は描画停止・署名鍵ローテーションと旧revision/接続の停止を組み合わせる。接続中の個別強制失効APIは今回提供しない。
+
+Backend実装は別PRで提供し、ローカルPostgreSQL・実SDKの署名検証（検証用RSA/JWKS）・実ブラウザの直接WS認証を確認した。Google OAuth設定、実Googleアカウントでのログイン、Frontendのログイン/更新/再生統合、8時間再接続とstagingの承認済み経路は未検証である。本番の描画WSSはそれらと公開承認が済むまで無効を維持する。
 
 描画へ渡すデータは、グラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻のみである。原写真、画像URL、生座標、生GPSは渡さない（2026-10-26決定、#23）。`campusGraphVersion`等の版が不一致のイベントは破棄し、直前互換版へ戻す。
 
