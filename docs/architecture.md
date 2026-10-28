@@ -30,7 +30,7 @@ Frontend リポジトリ /display（three.js）
 
 本番構成の技術方針はNext.jsの静的書き出しをCloudflareのサイトWorkerで配信し、Go BackendをCloud Run、正本DBをCloud SQL for PostgreSQL 17に置く。新規写真はスマートフォンのブラウザ内（IndexedDB等）に保存し、新規Cloud Storageオブジェクトは作らない設計目標。旧方式でCloud Storageに保存済みの写真は非公開のまま既定の`deleteAfter`まで保持し、本人資格での照会・削除と期限削除を継続する。大学の提供者・保存/処理地域と費用の承認は未完了。AWS等への変更は別途決定する。
 
-参加者端末から同一オリジンの`/api/backend/*`を通じてGoへ送る新規写真関連データは、写真ID・撮影時刻・`checkpointId`等の経路用メタデータだけとし、画像バイト列・画像URLは送らない設計目標。従来のGo発行署名URLによるCloud Storageへの直接PUTは新規写真に用いず、旧写真の本人照会に必要な認証付き取得経路だけを維持する。新規方式のFrontend/Backendは未実装であり、旧方式の本人操作・期限清掃を無断で停止しない。描画PCはthree.jsの`/display`クライアントからGo（Cloud Run）へ外向きWSS接続する方針だが、認証・公開経路は未確定である。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。描画機へ写真原画像や画像URLを送らない。配置・WSSの未決事項はこの写真方式の変更で確定させず、詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を参照する。
+参加者端末から同一オリジンの`/api/backend/*`を通じてGoへ送る新規写真関連データは、写真ID・撮影時刻・`checkpointId`等の経路用メタデータだけとし、画像バイト列・画像URLは送らない設計目標。従来のGo発行署名URLによるCloud Storageへの直接PUTは新規写真に用いず、旧写真の本人照会に必要な認証付き取得経路だけを維持する。新規方式のFrontend/Backendは未実装であり、旧方式の本人操作・期限清掃を無断で停止しない。描画PCはthree.jsの`/display`からGoへ直接WSS接続し、Googleログイン＋運営メール許可リストで短期描画資格を発行し、最初のメッセージで資格と版を照合する。契約は[API](api.md#描画websocket)を正とする。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。描画機へ写真原画像や画像URLを送らない。公開経路・OAuth設定・Frontend統合・実機試験は未了であり、詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を参照する。
 
 ## データ配置
 
