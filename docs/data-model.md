@@ -35,6 +35,7 @@ erDiagram
         datetime consented_at
         datetime started_at
         datetime expires_at
+        datetime stopped_at
         datetime delete_after
         datetime created_at
     }
@@ -130,6 +131,7 @@ erDiagram
     IDEMPOTENCY_RECORD {
         string scope PK
         string key_hash PK
+        string memory_session_id FK
         string request_hash
         integer response_status
         string deletion_result
@@ -140,18 +142,30 @@ erDiagram
         integer id PK
         string operator_id
         string action
+        string operator_email_hash
         string target_type
         string target_id_short
         string result
         datetime created_at
     }
+
+    OPERATOR_CREDENTIAL {
+        string id PK
+        string token_hash UK
+        string actor_id
+        string email_hash
+        string origin
+        string role
+        datetime created_at
+        datetime expires_at
+    }
 ```
 
 `DISPLAY_CLIENT`は参加者データと関連付けない。描画機の接続監視だけに使用する。
 
-`IDEMPOTENCY_RECORD`は到着、削除の重複適用を防ぐ。キーそのものではなくハッシュ、操作スコープ、リクエスト内容のハッシュ、返却結果、有効期限を最大24時間保存する。同じキーで異なる内容が来た場合は競合として拒否する。削除冪等性記録は写真・チェックポイント地点・経路と同一期間で一緒に消す。削除記録はID、資格情報、写真やセッション内容を含めず、削除状態を安全に再現できる短期receiptとする。
+IDEMPOTENCY_RECORDはキー/要求hashと短期結果を保持する。写真/停止receiptはmemory_session_idのFKへ関連付け、最大24時間かつMemory.delete_after以内、Memory全削除でcascade消去。全体/一括削除の内容なし成功/部分成功receiptは従来の最大24時間だけ再送可能。所有者を復元できない旧receiptの期限は延長しない。同じkeyの異なる内容は409。到着receiptは保存済み応答ではなく同じArrivalEventの現在状態を解決する。
 
-`OPERATOR_AUDIT_LOG`は受付停止、再生、skip、fallbackなどの運営操作を記録する。位置情報、参加トークンを含めず、対象IDも運営上必要な短縮表現にする。
+OPERATOR_AUDIT_LOGは個人Google subjectの安定hashと正規化メールの照合hash、操作・短縮対象・結果・時刻を24時間保持する。生メール/sub・token・写真/地点は保存しない。メールhashは許可設定から照合でき匿名化ではない。旧サービス監査のoperator_email_hashはNULLのまま期限で消す。OPERATOR_CREDENTIALは2分・Origin束縛の独立operator資格で、token hashだけを保存し、個別/同一actor全資格の削除で失効。描画/参加者資格と共用しない。
 
 ### 廃止エンティティ
 
@@ -177,9 +191,9 @@ erDiagram
 
 ## MemorySession
 
-写真のメタデータ、チェックポイント地点、経路、到着演出を管理する単一セッションである（#23）。写真Blobと本人画面の画像表示は端末内に限る。セッション作成時の`campus_graph_version`を記録し、写真地点`checkpointId`の検証と経路再構成に使う。現行Backendの写真オブジェクト保存とは異なる未実装契約であり、旧Sessionの画像消去責任は残る。
+写真メタデータ・地点・経路・到着演出を管理する単一MemorySession。画像は端末内だけ、Backendの/v2はclient ID・checkpoint・撮影時刻を保存し、固定campus_graph_versionで経路を再構成するローカル実装を持つ。旧Sessionの画像消去責任を継続し、公開/同意承認と配備は別とする。
 
-- `status`: `main`（体験中）、`arrived`（到着済み）、`ended`（終了）。`on_site`概念は廃止
+- statusはarrival、expires_at、stopped_atから導出するmain/arrived/ended。冗長な状態列を追加しない。停止時刻は最初の値を固定し、停止/失効でも本人閲覧・削除はdelete_afterまで残す
 - `consent_version`: 旧草案`2026-memory-photo-no-gps-draft-1`はサーバー写真保存を前提とし、新方式に再利用しない。新しい版・本文と正本の所在は#9で関係者と相談・大学審査後に決定する。承認前は新方式のセッションを発行しない
 - `expires_at`後は写真登録などの新規操作を受け付けず、本人の状態・写真の閲覧と自己削除は`delete_after`まで許可する。開発側既定はTTL 6時間・`delete_after`失効後24時間
 

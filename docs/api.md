@@ -9,7 +9,7 @@
 - 時刻: UTCのISO 8601
 - 参加者認証: セッション作成時に発行するBearer token
 - 描画認証: Googleログイン＋運営メール許可リストを採用。Google IDトークンからOrigin束縛の短期描画資格を発行し、WSの最初のメッセージで資格と版を照合する。詳細は[描画WebSocket](#描画websocket)。長期署名鍵をブラウザ、URL、Workerへ配布しない
-- その他の運営認証: 参加者・描画用とは別の権限と資格を使う。発行・失効・監査・公開経路は設計Issue #11で継続し、描画資格だけで一般の運営操作を認めない
+- その他の運営認証: Google本人確認から描画とは独立した個人用operator資格を発行する。初期許可者はasync5855@gmail.comのみ。個別/本人全資格の失効、独立Origin/allowlist、個人actorとメール照合hashの監査を採用する（2026-10-29依頼者決定）。実Google設定・本番入口・公開承認は別とする
 - 到着・削除操作は冪等にする
 - GPS（Geolocation API、`watchPosition`、撮影時位置取得）は使用しない。写真地点は参加者が3Dマップで選択した`checkpointId`のみで、座標・対応ノードIDの解決はBackendが行う。クライアントpayloadに座標・ノードID・グラフ版を追加しない（2026-10-26決定、#23）
 - セッションは写真用`MemorySession`単独とする。`LivePresenceSession`の新規発行は行わない（2026-10-26決定、#23）
@@ -30,13 +30,13 @@
 | 端末内の写真 | 暫定で1セッション12枚、合計30MB、1枚5MB、JPEG/WebP、長辺1920px以下。画像バイト列はAPIへ送らない |
 | Push購読・設定 | 1セッションあたり10回/分、JSON 16KB |
 | 描画WebSocket受信 | 1接続あたり10メッセージ/秒、各256KB |
-| 運営API | 1操作者あたり60回/分 |
+| 運営API | 個人actorごとに60回/分・burst 30（token bucket）。資格発行は検証前のIP/全体と検証後actorで別制限 |
 
 制限超過は`429`と`Retry-After`を返し、正常な共有回線を遮断しないよう監視しながら調整する。
 
 ## 冪等性キー
 
-到着、削除の`Idempotency-Key`は操作スコープ、キーのハッシュ、リクエスト内容のハッシュ、結果を24時間保持する。同じキーで異なる内容は`409 IDEMPOTENCY_CONFLICT`とする。到着は一度だけ作成したArrivalEventの**現在の**再生状態を返す（以前の`queued`応答を固定して返さない）。削除以外の他の冪等操作は同じキーと内容に以前の結果を返す。削除の冪等性記録は写真・チェックポイント地点・経路と同一の保持期間で一緒に消す（2026-10-26決定、#23）。
+冪等性キーと要求内容はハッシュで記録する。同じキーの異なる内容は409 IDEMPOTENCY_CONFLICT。到着済み本人の再送は同じArrivalEventと現在の再生状態を返し、過去のqueued応答へ固定しない。写真/停止receiptはMemoryへ紐付け、最大24時間かつdeleteAfter以内、Memory全削除時にcascade消去する。内容なしの全体/一括削除の成功・部分成功receiptだけは従来の最大24時間の再送を維持する。移行で所有者を復元できない内容なし旧receiptは既存期限を延長しない。
 
 ## 公開設定・同意文
 
@@ -107,6 +107,7 @@
   "memorySession": {
     "sessionId": "mem_example",
     "participantToken": "memory-participant-secret",
+    "status": "main",
     "expiresAt": "2026-07-13T18:00:00Z",
     "deleteAfter": "2026-07-14T18:00:00Z"
   }
@@ -116,6 +117,15 @@
 単一の`MemorySession`を発行する。`enableLivePresence`、`livePresenceConsentVersion`、`experienceLinkToken`、レスポンスの`livePresenceSession`は廃止した（2026-10-26決定、#23）。`participantToken`はレスポンス時だけ返し、サーバーにはハッシュを保存する。有効な同意文と異なる版は`409 CONSENT_VERSION_MISMATCH`として拒否する。
 
 `expiresAt`は開発側既定で失効まで6時間、`deleteAfter`は失効後24時間とする。例示日時と保持期間は大学のプライバシー審査（#9）による決定値ではない。`expiresAt`以後は写真メタデータの新規登録などを拒否するが、本人の状態取得・閲覧と削除は`deleteAfter`まで利用できる。`deleteAfter`到達時にサーバーの写真メタデータ・チェックポイント地点・経路・削除冪等性記録を一緒に期限削除する。端末内写真は別の保存領域であり、端末を開かない間の即時削除はサーバーから保証できない。
+
+### `POST /v1/memory-sessions/{memorySessionId}/stop`
+
+本人Memory Bearer、Idempotency-Key、空bodyで200を返す。statusはended、stoppedAt・expiresAt・deleteAfterを返し、最初の停止時刻と既存期限を固定する。Push購読/予定、queued/playing演出、描画除外、fallback進行とreceiptを同じtransactionで確定する。以後の写真/地点入力、初回到着、Push再購読、新規再生は拒否する。通知だけの解除とは異なり再開不可。停止は削除ではなく、本人の状態/ストーリー閲覧と削除はdeleteAfterまで残す。
+
+### `GET /v1/live-presence-sessions/{liveSessionId}`（旧所有者のみ）
+
+旧Live自身のBearerでsessionId・trackingStatus・expiresAt・deleteAfterだけを返す。Memory削除後も、Live自身の失効後もdeleteAfterまで照会・停止・削除を維持する。Memory/他人の資格や保持期限後は401。旧位置やaliasを返さず、停止で期限を変更しない。
+
 
 ## 位置送信・会場内表示・追跡停止（廃止契約）
 
@@ -141,11 +151,11 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: 
 }
 ```
 
-到着は、展示ブースのプロジェクター映像に表示し定期更新する署名・期限付きQR（用途、`checkpointId`、会場、発行時刻、有効期限、ランダム値、署名鍵ID）のBackend検証でのみ成立する（2026-10-26決定、#11）。Backendだけが署名鍵を保持して到着証明を発行し、会場の投影装置は発行済みQRを表示する。発行要求元の本番認証経路は描画トークンとは別に保留中であり、公開APIから無認証で発行してはならない。QRの有効期間と更新間隔は実機試験で決める。参加者は展示ブースの列に並び、自分の番でWeb App内のカメラから読む。待ち順は人の列で扱い、参加端末へ順位・予想待ち時間・色・記号を返さない。
+到着は展示ブースの署名QR（purpose:"arrival"、keyId、checkpointId、venue、issuedAt/expiresAt、nonce）をBackendが検証して成立する。署名鍵はBackendだけが保持し、個人operator資格で認可された運営入口だけが発行を要求する。技術既定は25秒有効・15秒更新で、現地の読取/不正利用対策は公開前に確認する。参加者はWeb App内のカメラで読み、順位・予想待ち時間・色・記号は返さない。
 
 Backendは本人Bearerと有効なMemorySessionを確認し、サーバー時刻で署名・用途・鍵ID・発行時刻・有効期限・会場・到着用`checkpointId`を検証する。`clientTime`は判定に使用しない。不正な証明は`400 INVALID_ARRIVAL_PROOF`で拒否し、ArrivalEventを作成しない。到着済みの同じMemorySessionの再送は、QR期限後も本人資格で既存のArrivalEventと現在の`replay_status`を返し、二重到着・二重キュー登録をしない。投影QRは複数人が見られるため、QRのランダム値を全参加者で一度限りとみなすことはできない。別セッションによる有効期間内の読み取りや撮影済みQRの遠隔使用を署名だけで防げない点はPS-005・R-05の未解決リスクであり、公開前に責任者と対策を決める。
 
-有効な初回到着は写真枚数にかかわらずArrivalEventを1件作り、撮影通知を停止する。写真0枚・1枚は簡易表示とする（#23）。通常は到着順に演出を待ち、30秒を超えたことだけを理由にskipしない。有効なMemorySessionの`queued`は安全上限50件とし、`playing`は含めない。満杯の新規到着は`503 ARRIVAL_QUEUE_FULL`と`Retry-After: 5`を返し、到着・通知停止・冪等応答記録を確定しない。空きが戻りQRが有効なら同じ内容とキーで再試行できる。QR期限切れなら再読取して新しい内容とキーで送る。既存の待機者は維持するが、MemorySessionの期限切れ・本人削除は待機を終了させる。障害・閉場時の運用は別途確定する。`status`はArrivalEventの現在の`replay_status`であり、再読込時は状態取得APIから復元する。[Backend Draft PR #36](https://github.com/Mino829/TRACE_B/pull/36)でこのキューと単一再生・FIFO開始検証を実装し、ローカルHTTP/WSで確認済み。main統合・配備・Frontend結合・実機試験済みを意味しない。
+有効な初回到着は写真枚数によらずArrivalEventを1件作り、通知を停止する。0枚は経路なしの簡易表示、1枚でも写真地点からShibaLabまでの経路を返す（2026-10-29依頼者決定）。FIFOの有効queued上限は50件でplayingを含まず、通常待機30秒ではskipしない。満杯時は503 ARRIVAL_QUEUE_FULLとRetry-After: 5を返し、到着・通知停止・receiptを確定しない。空き回復後は再試行でき、初回には有効QRが必要。停止・失効・本人削除は待機を終了させる。到着APIのstatusは現在のreplay_status、本人状態GETはreplayStatusで返す。ローカル実装/検証と配備・現地承認は別とする。
 
 描画機は参加者の演出中と、その後の終了画面では到着QRを非表示にする。非表示は到着受付の停止やQRの失効を意味しない。直前に読んだQRなど、有効な証明で再生中に届いた到着も検証・受付し、順番を待つ。短期QRでも撮影済みの値の期限内利用は防げないため、非表示だけを不正利用対策とみなさない。
 
@@ -183,9 +193,9 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`X-Trace-Live-Toke
 
 成功または部分成功をHTTP `200`で返す。Live側を先に削除・削除記録と一緒に確定し、続いてMemory側を別トランザクションで削除する。Live削除後にMemory削除が失敗した場合は`memory: "pending"`、`live: "deleted"`、`complete: false`を返す。一方の失敗で完了側を復活させない。`pending`や通信失敗の場合、端末は両方の資格情報と同じ冪等性キーを保持して同じリクエストを再送する。完了済み側は24時間の削除記録から結果を再現し、未完了側だけを再試行する。両方が`deleted`の場合だけ`complete: true`を返す。
 
-## 写真の端末保存とメタデータ（新契約、未実装）
+## 写真の端末保存とメタデータ（Backend実装、公開承認前）
 
-参加者のWeb Appは撮影画像の向き補正・EXIF除去・縮小・再エンコードを端末内で行い、同じブラウザのIndexedDBに保持する。画像Blob、ハッシュ、寸法・画像URLはBackendへ送らない。写真を端末へ保存できない場合は写真の登録を完了したと表示せず、容量・権限の確認または保存失敗を案内する。Backendへ送るのは匿名セッションに属する写真ID・`checkpointId`・撮影時刻だけである。現行Backendのクラウド写真APIはこの新契約の実装ではない。
+Web Appは向き補正・EXIF除去・縮小・再エンコードした画像を同じブラウザのIndexedDBに保持し、Blob・ハッシュ・寸法・画像URLをBackendへ送らない。端末保存失敗時は撮影完了にしない。Backendの/v2は匿名Memoryに属するclientPhotoId・checkpointId・capturedAtだけを保存する。サーバー実装の完了は端末保存の検証や同意/公開承認を意味しない。
 
 ### `GET /v2/memory-sessions/{memorySessionId}/photos`
 
@@ -203,7 +213,7 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: 
 }
 ```
 
-`checkpointId`は必須とし、セッション作成時に固定した`campusGraphVersion`でBackendが検証する。未選択・無効な地点は`400 INVALID_CHECKPOINT`。同じセッションの`clientPhotoId`と同内容の再送は同じPhotoMomentを返し、異なる内容は409、削除済みIDの再送は404として復活させない。端末は加工済み画像のローカル保存後にメタデータを送信する。オフラインならメタデータだけを端末内で再送待ちにし、`expiresAt`まで同じIDで再送する。期限切れで未送信ならサーバーの経路に現れず、画像を端末から保存または削除できるよう案内する。
+checkpointIdは固定Graphに存在するselectable:trueの地点が必須で、未知/未選択/非選択可能は400 INVALID_CHECKPOINT。同じclientPhotoId/同内容は同じPhotoMoment、別内容は409 STATE_CONFLICT、同じ冪等性キーの別内容は409 IDEMPOTENCY_CONFLICT。削除済IDは404で復活させない。端末はローカル保存後にメタデータを送信し、オフライン再送は停止/失効前だけ許可する。未送信写真はサーバー経路に現れない。
 
 ```json
 {
@@ -251,11 +261,11 @@ Headers: `Authorization: Bearer <memory-participant-token>`、`Idempotency-Key: 
 
 購読と未送信予定を削除する。到着、参加停止、期限切れ、Push providerの失効応答でも同じ処理を使う。通知payloadには写真、セッションIDを含めず、一般的な文面と撮影画面への相対URLだけを含める。文面は現行のまま維持する。
 
-## 本人用の写真ストーリー（新契約、未実装）
+## 本人用の写真ストーリー（Backend実装、画像は同じ端末のみ）
 
 ### `GET /v2/memory-sessions/{memorySessionId}/memory`
 
-本人Bearerで写真メタデータ・写真地点・経路を時系列に返す。画像とその取得URLは返さない。Backend #7の経路生成まで`segments`は空配列であり、下の非空例を現行提供済みとは扱わない。写真間の地点を撮影順につなぎ、最後の写真からShibaLabまで同じ線で再生する。
+本人Bearerでmomentsとsegmentsを同じ読み取り専用REPEATABLE READスナップショットから返す。画像/取得URLは返さない。写真間を撮影順につなぎ、到着後は最後の写真からShibaLabまでの区間を含める。0枚は経路なし、1枚でも到着区間を持つ。停止後/失効後もdeleteAfterまで閲覧・削除できる。実会場データの正しさや端末内画像の存在はBackendで保証しない。
 
 ```json
 {
@@ -301,12 +311,19 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 }
 ```
 
-旧Backend #6の写真実装では、`photoSummary`の`ready`/`pending`/`failed`を旧クラウド写真のMemorySession実件数から算出し、`maxCount`は12とする。`deleting`は旧写真一覧から確認し、保持中の上限には含める。この旧例の`ready`は新しい端末限定写真の存在・内容をBackendが検証したことを意味しない。新方式の本人画面は`GET /v2/.../photos`でメタデータを照会し、画像の有無は同じ端末内で判定する。`status`は`main`、`arrived`、`ended`のいずれか（[状態遷移](state-machine.md)参照）。通知・到着キュー・新写真APIの未実装項目はこの例に登場するだけで提供済みとみなさない。
-`replayStatus`はArrivalEventの現在状態であり、到着前は`null`を設計目標とする（現Backendは空文字）。通常の待機時間だけではskipしない。満杯時に到着が未確定の人は受付済みとして表示せず、再試行を案内する。写真ストーリーと本人削除は演出スキップ後も`deleteAfter`まで利用できる。ただし新方式の画像は同じブラウザ内に残る場合に限り閲覧でき、旧写真の本人取得・削除は各`deleteAfter`まで維持する。
+photoSummaryは旧クラウド写真のready/pending/failedとmaxCount:12であり、端末画像の存在や内容を検証した値ではない。新方式は/v2のメタデータと同じ端末の画像を照合する。memorySession.statusはmain、arrived、endedで、停止/失効ならended、演出completed/skippedだけならarrivedを維持する。displayAliasとonSiteChoiceRequiredは返さない。
+replayStatusは現在のArrivalEvent状態、到着前はnull。本人の到着再送も同じIDと最新状態を返し、QR期限後も回復できる。通常待機だけではskipしない。満杯で未確定の人には再試行を案内する。演出skipでも本人閲覧・削除はdeleteAfterまで維持し、新規画像は同じブラウザに残る場合だけ閲覧できる。
 
 ## 運営API
 
 - `GET /v1/operator/status`: 接続数、到着キュー、描画機状態
+- `POST /v1/operator/credentials`: Google本人確認から独立した個人運営資格を発行
+- `DELETE /v1/operator/credentials/current`: 現在の資格だけを失効
+- `DELETE /v1/operator/credentials`: 同じ操作者の保存中の全資格を失効
+- `POST /v1/operator/arrival-proofs`: 署名済み到着QRを発行
+- `GET /v1/operator/arrivals`: FIFO候補を照会
+- `POST /v1/operator/arrivals/{arrivalId}/retry`: 描画障害skipを明示再試行
+- `DELETE /v1/operator/fallback`: 通常運転へ復帰
 - `POST /v1/operator/arrivals/{arrivalId}/skip`: 到着演出をスキップ
 - `POST /v1/operator/fallback`: 自律映像へ切り替え
 - `POST /v1/operator/registration/close`: 新規参加受付を停止
@@ -315,7 +332,18 @@ Web Appは返却された`clientPhotoId`で当該端末のローカル写真を�
 - `GET /health/ready`: DBと必要サービスの準備確認
 
 運営APIを参加者向け公開経路から分離する。受付停止、skip、再生、fallbackの操作は操作者、時刻、対象、結果を監査ログへ残す。監査ログに位置情報を含めない。写真ピン・フォトスポット停止APIは廃止した（2026-10-26決定、#23）。
-描画資格の発行はGoogleログイン＋許可リストに決定し、下記の専用APIを用いる。この資格で受付停止・到着QR発行・skip・fallback等を行う権限は与えない。それら運営資格の発行・失効・監査と公開経路は設計Issue #11で継続し、本番の運営入口は開放しない（Backend #11）。描画の方式決定も大学の公開承認やFrontend統合完了を意味しない。
+描画と一般運営の本人確認には同じGoogle Web identityを使えるが、audience/allowlist/Origin設定と資格は独立する。運営資格で描画認証せず、描画資格でQR発行・受付/通知停止・skip/retry・fallbackを認めない。参加者Workerは運営APIを転送しない。本番入口の有効化承認は別である。
+
+### 個人運営資格の発行・失効・監査
+
+TRACE_OPERATOR_ENABLED=falseを既定とし、有効化には独立のGoogle client ID、メール/Origin許可リスト、サーバー側Edge keyが必須。初期許可者はasync5855@gmail.comのみ。POST /v1/operator/credentialsは単一Google Bearer、完全一致Origin、空body/queryで、下記描画発行と同じ厳格なGoogle署名・claim・所有権検証を行う。成功200はoperatorToken・credentialId・expiresAt・role:"operator"を返す。Google token自体は通常運営APIで使わない。
+
+operatorTokenはランダム256bitの不透明値で2分有効・Origin束縛、ブラウザのメモリだけに保持する。DBはtoken hash、canonical Google subject hash、正規化メールの照合hashだけを保存する。各操作で現在の独立allowlist・期限・失効を検証し、参加者/描画資格と旧HMAC認証を拒否する。Edge keyは会場PCの認証付きloopback broker等のサーバー側だけが保持し、資格の取得/失効・QR要求を固定経路へ中継する。WSSは中継しない。
+
+current削除は現在の資格だけ、全資格削除は同一actorの保存中の資格をtransactionで消し、成功204後の要求は401。認証済みの処理中要求や、その後のGoogle再ログインまで禁止する操作ではない。アカウント禁止は独立allowlistから除去して新設定へ切り替える。UIは失効失敗を成功扱いせず、本人全資格削除に認可がなければ再認証を要求する。
+
+資格発行/失効、proof発行、skip/retry、受付/通知停止、fallbackと個人actor・メール照合hash・時刻・短縮対象・結果の24時間監査を同じtransactionで確定する。生メール/sub・token・画像/地点は監査へ保存しない。hashは匿名化ではなく許可メールから照合可能。旧サービス監査はNULLのメールhashのまま従来期限まで保持し、個人を推測して埋めない。期限切れ資格は通常清掃で削除する。実Google・公開経路・staging・投影機材の確認はローカル実装と分離する。
+
 
 ## 描画WebSocket
 

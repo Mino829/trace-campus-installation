@@ -30,7 +30,7 @@ Frontend リポジトリ /display（three.js）
 
 本番構成の技術方針はNext.jsの静的書き出しをCloudflareのサイトWorkerで配信し、Go BackendをCloud Run、正本DBをCloud SQL for PostgreSQL 17に置く。新規写真はスマートフォンのブラウザ内（IndexedDB等）に保存し、新規Cloud Storageオブジェクトは作らない設計目標。旧方式でCloud Storageに保存済みの写真は非公開のまま既定の`deleteAfter`まで保持し、本人資格での照会・削除と期限削除を継続する。大学の提供者・保存/処理地域と費用の承認は未完了。AWS等への変更は別途決定する。
 
-参加者端末から同一オリジンの`/api/backend/*`を通じてGoへ送る新規写真関連データは、写真ID・撮影時刻・`checkpointId`等の経路用メタデータだけとし、画像バイト列・画像URLは送らない設計目標。従来のGo発行署名URLによるCloud Storageへの直接PUTは新規写真に用いず、旧写真の本人照会に必要な認証付き取得経路だけを維持する。新規方式のFrontend/Backendは未実装であり、旧方式の本人操作・期限清掃を無断で停止しない。描画PCはthree.jsの`/display`からGoへ直接WSS接続し、Googleログイン＋運営メール許可リストで短期描画資格を発行し、最初のメッセージで資格と版を照合する。契約は[API](api.md#描画websocket)を正とする。会場PC上のGo Backendは開発または承認済み緊急構成に限り、本番正本へ同時書き込みしない。描画機へ写真原画像や画像URLを送らない。公開経路・OAuth設定・Frontend統合・実機試験は未了であり、詳細は[インフラ・データベース方針](infrastructure-database-decision.md)を参照する。
+参加者は同一オリジンの/api/backend/*を通じ、写真ID・撮影時刻・checkpointIdだけをGoの/v2へ送り、画像バイト列/URLは送らない。Backendのmetadata・経路・停止・期限削除、Frontendの対応callerをローカル実装し、実Workerポリシー→Go HTTPと合成Googleによるブラウザ連携を検証する。旧写真の認証付き取得/削除と各deleteAfterは維持し、旧PUTを再開しない。描画PCは/displayからGoへ直接WSS接続し、Google本人確認から短期描画資格を取得、最初のframeで資格/版を照合する。一般運営は独立した個人operator資格で、Edge keyを持つ会場PCの認証付きloopback broker等を使う。WSSをbroker中継しない。原写真/URLを描画へ送らず、公開経路・実OAuth設定・現地/8時間試験と大学承認はローカル実装完了と区別する。
 
 ## データ配置
 
@@ -100,10 +100,10 @@ MVPではGo Backendを単一の主インスタンスとして開始し、セッ�
 
 ## セキュリティ境界
 
-- サイトWorkerは許可したAPIだけを中継し、サーバー側のedge secretでGoの`/v1/*`への到達を制限する。Bearerは参加者の個別認証であり、edge secretをブラウザ・描画機へ公開しない。CI・運営のCloud Run操作はIAMを使う
+- サイトWorkerは許可した/v1・/v2の本人APIだけを中継し、Edge keyをサーバー側で追加する。運営APIは転送しない。個人運営の取得/失効/QRは別の認証付き運営入口を使い、ブラウザ・描画機へEdge keyを公開しない。Cloud Runの管理操作はIAMを使う
 - 参加者、運営、描画の資格情報とAPI権限を分離する
 - 参加者トークンをURL、アクセスログ、描画イベントへ含めない
-- 運営APIは公開参加経路と分離し、短期資格情報と操作履歴を使用する
+- 一般運営は独立Google audience/allowlist/Origin、2分のopaque資格、個別/本人全資格の失効と個人監査を持つ。初期許可者async5855@gmail.comのみ。Google本人確認の共用を描画権限/資格の共用とみなさない
 - 描画接続は主系を一台に限定し、到着演出の二重処理を防ぐ
 - 開発・試験・本番を分離し、本番の位置データを開発へコピーしない
 
