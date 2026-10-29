@@ -18,6 +18,8 @@ stateDiagram-v2
     main --> arrived: signed and expiring QR verified
     arrived --> ended: expires_at reached
     main --> ended: expires_at reached
+    main --> ended: participation.stop
+    arrived --> ended: participation.stop
     ended --> [*]: deleteAfter reached, data deleted
 ```
 
@@ -25,7 +27,7 @@ stateDiagram-v2
 |---|---|---:|
 | `main` | 同意済みで体験中。写真撮影・地点申告・到着待ち | Yes |
 | `arrived` | 到着証明を検証済み。撮影通知を停止 | 写真登録は可（失効前） |
-| `ended` | 失効。完了状態・削除予定日時・ストーリー保存の表示のみ | No |
+| `ended` | 参加停止または失効。本人の状態・ストーリー閲覧/削除はdeleteAfterまで維持 | No |
 
 | 現在 | イベント | 次 | サーバー処理 |
 |---|---|---|---|
@@ -33,6 +35,7 @@ stateDiagram-v2
 | `main` | `arrival.accepted` | `arrived` | 署名・期限付きQRを検証し、ArrivalEventを作成、撮影通知を停止 |
 | `main` | `session.expire` | `ended` | 新規操作を拒否。照会・自己削除は`delete_after`まで維持 |
 | `arrived` | `session.expire` | `ended` | 同上 |
+| `main` / `arrived` | `participation.stop` | `ended` | 停止時刻固定、写真/初回到着/Push再購読/新再生を禁止。通知削除とqueued/playingのparticipant_request skip・描画除外を同じtransactionで確定し期限は変更しない |
 | `arrived` | `replay.completed` / `replay.skipped` | `arrived`（維持） | 演出状態はArrivalEventだけを正とし、`status`を上書きしない |
 
 到着証明は展示ブースで投影・定期更新する署名・期限付きQRのBackend検証でのみ成立する（2026-10-26決定、#11）。期限切れ、改変、別会場の証明は拒否する。`on_site`概念は廃止した。削除は状態遷移ではなくデータ消去であり、[削除](#削除)を参照する。
@@ -72,7 +75,7 @@ stateDiagram-v2
 | `queued` | `replay.started` | `playing` | 到着順に自動送信された開始要求について主描画機リース・状態を検証し、開始時刻を記録する |
 | `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
-| `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
+| `playing` | `replay.failed` | `skipped` | 固定理由renderer_failureを記録し通常展示を継続。任意の例外文や個人情報は保存しない |
 待機中の`queued`は先入れ先出しとし、通常の混雑では順番を待って再生する。30秒経過だけを理由にskipしない。有効なMemorySessionの待機上限は50件（`playing`を除く）で、満杯の新規到着は503の一時エラーとし到着・通知停止を確定しない。空きが戻れば有効QRで再試行する。同じセッションの再送は二重登録しない。MemorySessionの期限切れ・削除は待機を終了させる。Backend Draft PR #36がこの変更を実装し、#34/#35から積み上がっている。閉場時の整理と障害運用は別途確定する。
 
 通常開始に運営者の操作は不要。主描画機は前の演出の完了確定後に終了画面を4秒表示し、その後に次の待機到着の開始を要求する。終了画面中は次を開始せず、待機がなければQR画面へ戻る。終了画面は描画機の表示状態であり、到着状態は`completed`のままとする。待機描画機は開始できず、完了済み・スキップ済みの到着を通常の自動開始へ戻さない。障害後の再試行は別途決定する。
@@ -81,11 +84,11 @@ stateDiagram-v2
 
 再生データはグラフの点IDの並び（経路）+グラフ版+写真ごとの点IDと撮影時刻である。経路は写真を撮った順に各写真の地点をCampusGraph最短経路でつなぎ、最後の写真からShibaLab（到着）までの区間も同じ線で描く。再生は全体10〜20秒、区間の長さに比例配分、写真地点で少し停止する。
 
-**写真0枚・1枚の到着**: 到着自体は写真枚数に依存せず成立する（2026-10-26決定、#23）。0枚・1枚のときは再生を簡易表示（スポット名や写真の有無の案内）に縮小し、経路再生または単一地点表示に落ち着かせる。到着とセッション終了を妨げない。2枚以上のときは写真地点を結ぶ経路再生を返す。
+**写真0枚・1枚の到着**: 到着は枚数によらず成立する。0枚は経路なしの簡易表示、1枚でも写真地点からShibaLabまでの最短経路を表示する（2026-10-29依頼者追加決定）。2枚以上は写真間に最後の到着区間を加える。写真間の経路がないことを、1枚の到着区間を消す条件にしない。
 
 ## 冪等性・競合制御
 
-- 到着済みセッションへの本人認証済み再送はQRの期限に関わらず既存のArrivalEventを返す。投影QRの同一値は複数セッションで読めるため、証明そのものの一回限りの使用は保証しない
+- 到着済み本人はQR期限/鍵切替に関わらず同じArrivalEventと最新状態を回復できる。同じkeyの異なる要求は409。投影QRは複数セッションが読め、proof自体の全体一回限りを保証しない
 - 描画機からの同じ`eventId`は一度だけ適用する
 - 到着作成はArrivalEvent作成と`status=arrived`更新を一つのDBトランザクションで行う
 - 演出開始は主描画機リースを持つ一台だけが確定できる
