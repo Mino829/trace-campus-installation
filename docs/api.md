@@ -194,6 +194,21 @@ Header: `Idempotency-Key: random-value`
 
 到着証明は、展示ブースのプロジェクター映像に表示し定期更新する署名付きQR（`checkpointId`、会場、発行時刻、有効期限、ランダム値）とする（Mino829/TRACE_F#10）。参加者は展示ブースの列に並び、自分の番でWeb App内のカメラからこのQRを読み取る。Web App内で読み取るため、到着を読み取った端末のMemorySessionへ結び付けられる。待ち順は人の列で扱い、参加端末へ順番、予想待ち時間、色・記号を返さない。このリクエスト・レスポンスは提案であって提供済みAPIではない。採用時は期限切れ、改変、別会場の証明を拒否し、MemorySessionへ到着イベントを作り、有効なExperienceLinkがある場合だけ対応するLivePresenceSessionを`arrived`へ変更する。到着時に撮影通知を停止・削除する設計だが、通知自体も未実装なら利用可能と案内しない。通常GPSは本人が継続可否を選ぶまで自動停止しない。
 
+### `POST /v1/memory-sessions/{memorySessionId}/arrival/replay`
+
+同じ本人が展示のQRを読み直し、完了した経路をもう一度上映する操作。初回到着の通信再送とは分離する。この追加契約はMemory本人資格を使い、旧Live/GPSへの参加を再開しない。
+
+- Memory Bearer、`Idempotency-Key`、JSONの`checkpointToken`・`clientTime`を送る。成功はHTTP 200の`{arrivalId, status:"queued"}`。`arrivalId`は今回の上映を識別する新しい公開ID。
+- Memoryが有効・未停止・非削除で、直前の上映が`completed`の場合だけ受理する。`queued`／`playing`では追加予約や割込みをせず409。`skipped`は本人再視聴で復活させない。
+- 新規操作には期限内の正しいQR証明が必要。初回到着を含め、同じ証明は同じMemoryでは一度だけ使用できる。証明は他の参加者とは共有可能。保存するのは証明のfingerprintだけで、署名付き証明そのものは保存しない。
+- 受理した操作の同じキー・同じ本文の再送は、同じ公開上映IDの保存済み成功応答を返し、再投入しない。受理済みの再送は証明失効後も回復可能。同じキー・異なる本文は409。初回到着の冪等性記録とはスコープを分ける。
+- 待機列の末尾へ追加する。待機上限50件と全体で同時再生1件を共有し、満杯時は503 `ARRIVAL_QUEUE_FULL`／`Retry-After:5`。失敗時は証明消費・receipt・状態変更を確定しない。
+- 到着自体のID・時刻、経路の到着終端、Memoryの期限、到着で停止したPushは変更しない。初回`/arrival`の再送は引き続き同じ到着IDと現在の状態を返し、再視聴を開始しない。
+- 展示には新しい公開上映IDの経路projectionと`arrival.replay.requested`を同一transactionで配信する。過去の上映IDの開始・完了・失敗通知で、現在の上映を進めない。
+
+参加画面は完了後に「もう一度 QR コードを読み取る」を表示する。既存の写真閲覧・参加資格を維持し、内部スキャナーと展示QRのURLからの再訪の両方で同じ再視聴操作を使う。単なるページ再読み込みや本人状態のGETでは再投入しない。
+
+
 ### `POST /v1/live-presence-sessions/{liveSessionId}/on-site`
 
 ```json

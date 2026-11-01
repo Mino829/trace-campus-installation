@@ -267,12 +267,16 @@ LivePresenceSessionごとに最大1件の最新表示位置を持つ論理エン
 
 ## ArrivalEvent
 
-到着はセッションにつき最大1件とする。二重送信は同じ結果を返す。
+到着自体はセッションにつき最大1件とし、初回到着の二重送信は同じ到着IDと現在の状態を返す。完了後の明示的な本人再視聴は、この到着行の上映だけを新たな公開上映IDで再投入する。到着時刻と経路終端は書き換えない。
 
 - `source`: `qr`、`nfc`、`operator`
 - `replay_status`: `queued`、`playing`、`completed`、`skipped`
 - `checkpoint_id`: 到着場所の識別子。署名付き証明そのものは保存しない
 - `skip_reason`: `participant_request`、`timeout`、`renderer_failure`、`operator`
+- `replay_id`: 現在の上映を識別する公開ID。初回は到着IDと同値、再視聴時に更新。描画snapshot・イベント・開始／終了の照合はこのIDを使い、過去の上映通知を現在の上映に適用しない
+- `queued_at`: 現在の上映を待機列へ投入した時刻。初回は到着時刻、本人再視聴は再投入時刻。FIFOの比較に使う
+- 本人再視聴receipt: Memory単位で初回到着とは別の冪等性スコープを持ち、要求hashと同じ公開上映IDの成功応答を保持する
+- 証明の使用記録: 初回を含むQR証明のfingerprintをMemory単位で保持する。別Memoryの共有QR利用を妨げず、本人削除ではCASCADEで消去する。生の証明・本人tokenは保存しない
 
 到着の受付ではMemorySessionへArrivalEventを作成し、ExperienceLinkが有効な場合だけ対応するLivePresenceSessionの`presence_phase`を`arrived`へ更新する。LivePresenceSessionのGPS送信は自動停止せず、参加者が停止するか、追加同意して`on_site`へ進む。再生状態はArrivalEventだけを正とし、MemorySessionへ`replaying`を重複保存しない。
 
