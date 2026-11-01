@@ -89,6 +89,7 @@ stateDiagram-v2
     Queued --> Skipped: participant, timeout, operator
     Playing --> Completed: primary renderer completes
     Playing --> Skipped: renderer failure or emergency
+    Completed --> Queued: fresh QR and explicit owner replay with a new playback ID
     Completed --> [*]
     Skipped --> [*]
 ```
@@ -107,16 +108,19 @@ stateDiagram-v2
 | `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
 | `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
 | `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
+| `completed` | 本人が有効QRを再読取 | `queued` | 新しい公開上映IDでFIFO末尾へ再投入。初回到着時刻は固定 |
 
 ## 冪等性・競合制御
 
 - 到着済みセッションへの到着要求は既存のArrivalEventを返す
+- 初回到着の再送と本人再視聴は別操作。完了後の新しいQR読取だけが`/arrival/replay`で再投入できる。待機中・再生中は追加予約せず、skipped／停止・失効・削除済みを復活させない。
+- 再視聴の通信再送は同じキー・本文・上映IDに解決し、もう一度キューへ追加しない。使用済みQRのfingerprintはMemory単位で消費し、別キーでも同じ証明を再利用させない。
 - 停止済みセッションへの停止要求は成功として現在状態を返す
 - LivePresenceSessionごとに通常GPSは最新1件だけを上書きし、古い`recordedAt`を拒否する
 - 描画機からの同じ`eventId`は一度だけ適用する
 - 到着作成と、有効なExperienceLinkを介した`presence_phase=arrived`更新を一つのDBトランザクションで行う
 - 演出開始は主描画機リースを持つ一台だけが確定できる
-- 終端状態から別の状態へ戻さない
+- 参加停止などの終端状態は復活させない。上映の`completed`後だけは有効な本人による明示再視聴を許可し、新しい公開上映IDで過去の描画通知と分離する。
 
 ## 削除
 
