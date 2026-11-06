@@ -1,131 +1,170 @@
-# 参加追跡・到着演出の状態遷移
+# 参加追跡・到着演出の状態遷移（完成版）
+
+更新日: 2026-11-06
+
+Backend `6b87961`（schema 20）／Frontend `be94bd2`に対応する。新規GPS追跡は廃止済み。Memory参加、到着の有無、再生世代、任意通知、旧Live、削除を別の状態として扱う。画面のローカル作品閲覧をサーバー到着と混同しない。
 
 ## 分離方針
 
-写真の思い出、リアルタイム位置、会場内フェーズ、到着演出は別の関心事として管理する。到着は演出を開始するが、リアルタイム位置を自動停止しない。
+| 関心 | 正本 |
+|---|---|
+| Memory参加 | memory_sessionsのstopped_at／expires_atとarrival_eventsの存在からAPI statusを導出 |
+| 初回到着 | Memoryにつき1行のarrival_events。root id、arrived_at、checkpoint_idは再視聴で変更しない |
+| 現在の展示再生 | arrival_eventsのreplay_id／queued_at／replay_status |
+| 写真 | 新規は端末JPEG＋サーバーmetadata。旧GCSのupload状態はlegacyに限定 |
+| 通知 | 作成時のpush_after_arrival、終端push_stopped、任意購読active／paused、運営停止 |
+| 旧Live | tracking_status／presence_phaseは互換保存。新規位置受付・継続なし |
+| 削除 | 永続データ・オブジェクト・端末画像の消去であり、単なるstatus変更ではない |
 
-- `LivePresenceSession.tracking_status`: 通常GPSの最新値を受け付けるか
-- `LivePresenceSession.presence_phase`: 来場前、到着、会場内、終了のどこか
-- `PhotoAsset.status`: 写真の送信・検証・削除状態
-- `ArrivalEvent.replay_status`: 到着演出がどこまで進んだか
-
-通信切断は永続状態にしない。`last_seen_at`から運営画面が`degraded`と判定し、再接続時は有効期限内の同じセッションを継続する。
-
-## 追跡状態
-
-```mermaid
-stateDiagram-v2
-    [*] --> Tracking: consent accepted
-    Tracking --> Stopped: participant or operator stops
-    Tracking --> Expired: expires_at reached
-    Stopped --> [*]
-    Expired --> [*]
-```
-
-| 状態 | 内容 | 位置点受付 |
-|---|---|---:|
-| `tracking` | 同意済みで追跡中 | Yes |
-| `stopped` | 参加者、運営の操作により停止 | No |
-| `expired` | 追跡上限を過ぎて失効 | No |
-
-| 現在 | イベント | 次 | サーバー処理 |
-|---|---|---|---|
-| - | `live_presence.created` | `tracking` | 専用トークン、追跡失効、削除期限を発行 |
-| `tracking` | `tracking.stop` | `stopped` | `stop_reason`を記録し、以降の位置点を拒否 |
-| `tracking` | `live_presence.expire` | `expired` | 位置送信用資格を失効させ、最新表示位置を破棄して以降の位置点を拒否。状態取得と自己削除用の資格は`delete_after`まで保持 |
-
-MemorySessionも自身の`expires_at`後に追跡操作を停止する一方、各セッションは自身の`delete_after`まで本人の読み取り・自己削除を受け付ける。`expires_at`と`delete_after`を同一視しない。
-
-## 会場内フェーズ
+## Memory参加状態
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Approaching: live presence created
-    Approaching --> Arrived: arrival accepted and linked
-    Arrived --> OnSite: explicit additional consent accepted
-    Arrived --> Ended: participant stops
-    OnSite --> Ended: participant stops or session expires
+    [*] --> Main: 同意とMemory作成成功
+    Main --> Arrived: 初回到着を受理
+    Main --> Ended: 本人参加停止またはexpires_at
+    Arrived --> Ended: 本人参加停止またはexpires_at
+    state "main" as Main
+    state "arrived" as Arrived
+    state "ended" as Ended
 ```
 
-- `approaching`: 展示場へ来る前。最新位置をキャンパス展示へ使う
-- `arrived`: 到着済み。撮影通知は終了するが、通常GPSの停止・会場内継続を選べる
-- `on_site`: 用途・粒度を示した追加同意後。原則エリア表示とし、精度不足時は操作時だけの表示へ落とす
-- `ended`: 表示終了。最新位置を削除する
+`memory_sessions.status`列はない。未停止・参加期限内なら到着前main、到着後arrived、停止・失効後ended。演出completed／skippedだけではendedにしない。
 
-ExperienceLinkがない場合、MemorySessionの到着はLivePresenceSessionへ影響しない。`on_site`は有効な到着処理で`arrived`になったセッションからだけ進める。到着QRの受付だけでは移行せず、会場内用途・表示粒度を示した本人の明示的な追加同意版を必須にする。到着証明の具体的な仕組みはIssue #11で未決定。
+| 操作 | 結果 |
+|---|---|
+| 「作品を見る」 | 到着前からローカル写真・3D経路・作品保存へ。参加／到着／再予約／通知を変更しない |
+| 初回QR | 有効proofで初回到着を確定。Memoryをarrivedへ |
+| 完了後の新QR | 同じMemory・写真で別再生世代を末尾へ予約。Memory statusはarrivedのまま |
+| 本人参加停止 | 最初のstopped_atを固定。Push消去、queued／playingをparticipant_request skip、描画除外・fallback進行を同transactionで確定 |
+| 参加期限 | 新規写真・初回到着・再視聴・購読等を拒否し描画から除外。本人閲覧・削除の期限は維持 |
+| 通知だけ解除 | 参加終了ではない。終端停止がなければ再同意・再購読可能 |
+
+停止後に同じMemoryを再開するAPIはない。`expiresAt`／`deleteAfter`を停止・到着・演出完了で短縮も延長もしない。`deleteAfter`到達後の本人認証は拒否するが、期限削除成功は別途確認が必要。端末内作品はサーバー資格の失効と同時に消えるわけではない。
 
 ## 写真状態
 
+### 新規device写真
+
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending: photo metadata accepted
-    Pending --> Ready: upload and validation complete
-    Pending --> Failed: timeout or validation failure
-    Ready --> Deleting: participant or session deletes
-    Failed --> Deleting: cleanup
-    Deleting --> [*]: object and records removed
+    [*] --> Local: JPEGと自己申告地点をIndexedDBへ
+    Local --> Registered: 到着前metadataをv2で受理
+    Local --> LocalOnly: 到着後撮影または送信対象外
+    Registered --> Removed: 本人metadata削除と端末写真消去
+    LocalOnly --> Removed: 本人端末写真消去
+    Local --> Removed: 本人端末写真消去
+    Removed --> [*]
 ```
 
-| 状態 | 内容 |
-|---|---|
-| `pending` | メタデータ作成済み、画像送信または検証待ち |
-| `ready` | 非公開保存と検証が完了し、本人用ストーリーで利用可能 |
-| `failed` | 送信期限切れ、形式・容量・EXIF検証失敗 |
-| `deleting` | オブジェクトと派生データを削除中 |
+図は端末／サーバーをまたぐ業務状態で、DBのstatus値ではない。v2にはpending／ready／failed等のupload状態はない。端末写真の画像はサーバー送信成功でも残り、metadata再送だけを完了する。登録はclientPhotoIdと入力hashで集約し、削除後はfenceが古い再送による復活を防ぐ。
 
-- 同じ`clientPhotoId`、ハッシュ、冪等性キーは一つのPhotoMomentへ対応させる
-- 画像検証に失敗した場合はオブジェクトを削除し、公開描画イベントを送らない
-- 写真単位削除では前後のRouteSegmentを無効化し、残りの写真アンカーから再生成する
-- `ready`遷移時に短期の写真ピンを発行し、削除・期限切れ時に消去とフォトスポット減算を発行する
-- 到着時に`pending`写真がある場合は暫定15秒待ち、完了しなければその写真を除いて演出を生成する
-- 写真0枚・1枚でも到着演出とセッション終了を妨げない
+参加期限内なら到着後も端末で撮影できるが、Frontendは到着後写真metadataをGoへ追加送信しない。Backendの写真追加APIは到着だけを禁止条件にしないため、この画面方針とAPIの許可範囲は同一ではない。写真追加・削除と経路再構成はサーバー内で一体化し、到着後のmetadata変更イベントは現再生世代の全投影を置換する。
+
+### 旧クラウド写真
+
+legacyの`photos.status`はpending／ready／failed／deletingが残る。新規device構成ではuploadしない。旧画像の本人閲覧はreadyだけ、削除ではdeletingフェンスを確定し、GCS消去を確認してから行を消す。不正画像の消去失敗もdeletingから再試行して、消去後にfailedへ進む。署名PUTの有効期限後までupload fenceの清掃を維持する。旧写真の状態を新規端末写真の保存状態へ転用しない。
 
 ## 到着演出状態
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Queued: arrival accepted
-    Queued --> Playing: primary renderer starts
-    Queued --> Skipped: participant, timeout, operator
-    Playing --> Completed: primary renderer completes
-    Playing --> Skipped: renderer failure or emergency
-    Completed --> [*]
-    Skipped --> [*]
+    [*] --> Queued: 初回到着とproof消費を確定
+    Queued --> Playing: 主leaseかつFIFO先頭が開始
+    Queued --> Skipped: 本人skip・運営・停止・失効・削除
+    Playing --> Completed: 同じ主leaseと現世代で完了
+    Playing --> Skipped: 描画失敗・切断・停止・削除・運営
+    Completed --> Queued: 有効Memoryが新QRで本人再視聴
+    Skipped --> Queued: renderer_failureのみ個人運営retry
+    state "queued" as Queued
+    state "playing" as Playing
+    state "completed" as Completed
+    state "skipped" as Skipped
 ```
 
-| 状態 | 内容 |
-|---|---|
-| `queued` | 到着済み、再生待ち |
-| `playing` | 主描画機が演出中 |
-| `completed` | 正常終了 |
-| `skipped` | 参加者選択、タイムアウト、障害、運営操作で終了 |
+completed→queuedと限定的なskipped→queuedは**新しいreplay_id・queued_atの世代**を作る操作であり、前世代の完了を巻き戻す操作ではない。同じ世代の終端へ遅れたrenderer messageが来ても状態を変更しない。
 
-| 現在 | イベント | 次 | サーバー処理 |
-|---|---|---|---|
-| - | `participant.arrived` | `queued` | 到着証明を検証し、キューへ一度だけ追加 |
-| `queued` | `replay.started` | `playing` | 主描画機リースと開始時刻を記録 |
-| `queued` | `replay.skipped` | `skipped` | 理由と終了時刻を記録 |
-| `playing` | `replay.completed` | `completed` | 完了時刻を記録 |
-| `playing` | `replay.failed` | `skipped` | 障害理由を記録し通常展示を継続 |
+### 初回と本人再視聴
+
+| 条件／処理 | 初回`arrival` | 本人`arrival/replay` |
+|---|---|---|
+| 初回未登録 | 有効・未停止Memory、有効proofが必要 | 対象外 |
+| 既存到着 | 初回root IDと現在statusを返す。再enqueueしない | completedだけ新規受理 |
+| proof | 新規初回でMemoryごと消費 | 新しい有効proofをMemoryごと消費。初回使用済みも再利用不可 |
+| 成功 | root id=replay_id、arrived_at=queued_at | 新replay_id・現在queued_at、root到着と経路終端は固定 |
+| 通知 | 作成時の同意方針に従う | 新たに止めたり復元したりしない |
+| receipt再送 | 入力hash照合、応答は現在status | 保存済み同一成功応答、再enqueueなし |
+| 終端・満杯 | 新規操作は確定しない | 同左。proof・receiptを消費しない |
+
+proofは25秒。サーバー署名・用途・鍵ID・会場・地点・時刻を検証する。記録はMemoryとSHA-256 fingerprintだけで、生proofをDBへ保存しない。別Memoryによる同じQR利用は禁止しない。既存到着回復／受理済み再視聴receiptの再送はproof期限後も可能だが、新しい予約は有効proofが必要。
+
+### FIFO
+
+- 待機は有効なMemoryのqueuedを`queued_at,id`順に最大50件、playingは全体1件。
+- 満杯は503＋Retry-After:5。初回到着／通知停止／旧Live更新／proof消費／receiptを部分的に確定しない。
+- 旧pending写真がある先頭は最大15秒だけ開始待機し、後続は追い越さない。写真0枚・1枚でも到着可能。
+- 通常待機の30秒timeoutは廃止。Memory自体の失効・停止・削除は除外する。
+- 主描画機が自動で先頭の開始を要求し、Backendが先頭・lease・単一playing・fallback状態を検証する。運営の毎回手動playはない。
+- 完了画面4秒・その間のQR非表示はFrontendの表示制御で、DB FIFOに4秒の待機状態を追加しない。
+
+## 主描画機lease・再接続
+
+専用OriginでGoogle由来displayTokenを取得し、直接WSSの最初の認証frame後にsnapshotを受信する。主leaseは30秒、10秒heartbeat等で更新。待機接続は受信できるが開始・完了を確定できない。
+
+主機切断・lease失効では、そのleaseがplaying中の世代をrenderer_failure skipにする。別機へ同じ再生を自動引継ぎしない。個人運営者の明示retryだけが有効Memory・空き枠を確認して新しい公開再生IDで末尾へ並べ直す。旧世代のrenderer eventId／arrivalIdを新世代へ読み替えない。
+
+接続直後・差分欠番・保持切れはsnapshotで全置換する。snapshotはcursorと到着／fallbackを同一transactionの切断面から取り、差分のDB連番と制御応答IDを区別する。通信断そのものをMemory参加停止にはしない。
+
+## fallback
+
+```mermaid
+stateDiagram-v2
+    [*] --> Normal
+    Normal --> Fallback: 運営POST・playingなし
+    Normal --> Pending: 運営POST・playingあり
+    Pending --> Fallback: 当該1件終了または固定30秒期限
+    Pending --> Normal: 運営DELETE
+    Fallback --> Normal: 運営DELETE
+    state "normal" as Normal
+    state "pending" as Pending
+    state "fallback" as Fallback
+```
+
+pendingでは新規開始を拒否し、現在の1件だけ待つ。30秒の固定期限は再送で延ばさず、期限時はその1件だけoperator skip。全モードで新規到着と待機列を保持する。再起動・再接続・新leaseでnormalへ戻さない。fallbackは受付停止／全通知停止ではない。
+
+## 撮影通知
+
+任意通知は30分のみ。購読active／pausedはMemory参加と独立だが、終端停止に優先できない。
+
+- 新規Memory作成時だけ`push_after_arrival`を固定する。既存はfalse。継続は従来と異なる新しい同意版・本文を設定し、その版で作った新Memoryだけに適用する。
+- falseは初回到着時にpush_stopped=true・購読削除・再購読禁止。trueは到着だけを理由に消去しないが、自動購読／復活もしない。
+- 参加／旧Live停止、期限、Memory削除、本人解除、provider失効、全通知停止で削除。いったん終端化したpush_stoppedを解除しない。
+- 単純購読解除は参加停止ではなく、許可条件を満たせば再購読できる。pausedは資格・鍵を保持する別状態。
+- 運営全停止はDBに永続化し全購読を消す。provider受理済み通知の到着を取り消せるわけではない。
+
+## 旧Liveの追跡状態・会場内フェーズ
+
+tracking／stopped／expired、approaching／arrived／on_site／endedは旧schema・本人操作のために残る。新規Live作成なし。位置POSTは本人認証後410、on-site continue trueも410で、新規GPS受付を復活させない。
+
+旧有効linkがある初回到着だけは、link資格を照合し、追跡中・来場前・期限内Liveをarrivedへ同transactionで更新する。停止済みLiveは再開しない。Live停止はstopped／endedにし位置キャッシュを消去するが、Memory写真を削除しない。旧Live自身のBearerによるGET／停止／削除はMemory削除後もLiveのdeleteAfterまで残す。
 
 ## 冪等性・競合制御
 
-- 到着済みセッションへの到着要求は既存のArrivalEventを返す
-- 停止済みセッションへの停止要求は成功として現在状態を返す
-- LivePresenceSessionごとに通常GPSは最新1件だけを上書きし、古い`recordedAt`を拒否する
-- 描画機からの同じ`eventId`は一度だけ適用する
-- 到着作成と、有効なExperienceLinkを介した`presence_phase=arrived`更新を一つのDBトランザクションで行う
-- 演出開始は主描画機リースを持つ一台だけが確定できる
-- 終端状態から別の状態へ戻さない
+- 同じキーで異bodyは409。初回到着、再視聴、写真、停止、削除のscopeとreceipt保持を分離する（[API仕様](api.md#冪等性キー)）。
+- 到着と再視聴はdisplay lease→queue→Memoryの順で直列化し、満杯・競合を副作用なしで返す。
+- rendererのeventIdはlease・操作・現世代を照合し一度だけ適用する。旧世代や失効leaseをroot IDへ読み替えない。
+- 写真削除・追加と経路再構成・公開投影を同transactionで確定する。部分的経路を実測として補完しない。
 
 ## 削除
 
-削除は状態遷移ではなくデータ消去である。MemorySession削除とLivePresenceSession削除を分け、両トークンを要求する`DELETE /v1/experiences/{experienceId}`では各処理を独立して完了させる。`Authorization`にはMemory用Bearer token、`X-Trace-Live-Token`にはLive用tokenを渡し、bodyなし、`Idempotency-Key`を付ける。HTTP 200の`{memory: "deleted"|"pending", live: "deleted"|"pending", complete: boolean}`で各側の結果を返す。一方が`pending`または通信失敗なら、両資格情報と同じキーを保持して再送し、完了側を復活させず未完了側だけ進める。別の個別DELETEで一方を消した後は残る側の個別DELETEを使う。片方を削除した時点でExperienceLinkを削除する。写真オブジェクトの削除を確認し、失敗時は`deleting`として再試行する。同じキーによる安全な再送に限り、IDやトークン、写真、位置、セッション内容を持たない24時間以内の短期削除記録から進捗を復元する。
+削除は停止とは別。Memoryと旧Liveは個別資格で個別削除でき、一括削除だけは両資格を要求する。Live側を先に独立確定し、Memory失敗はpendingとして同じキーで未完了側だけ再試行する。片側を消したらlinkは除去するが他方を勝手に消さない。
 
-## 異常系
+旧画像の消去失敗はdeletingとfence/outboxで追跡し、完了前に対象keyを失わない。device metadataの削除、端末IndexedDBの画像消去、本人書出し画像、バックアップは別範囲。会期終了、expires_at、delete_afterだけから実清掃完了を推定しない。
 
-- 描画機が接続されていない場合も到着を受け付け、上限内でキューへ保持する
-- 設定時間内に再生を開始できなければ`skipped`とし、通常展示を継続する
-- 端末時刻が不正でも、到着と停止はサーバー受信時刻を正とする
-- 主描画機が再生中に切断した場合は、同じ演出を自動で別端末から再開せず、skipまたは運営承認付き再試行とする
-- 参加者が再生前に削除した場合はキューから除外し、描画機へ停止イベントを送る
+## 実装参照
+
+- [Memory停止](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/memory_sessions.go)、[本人status／旧Live API](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/api/server.go)
+- [初回到着・FIFO](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/arrivals.go)、[再視聴・proof消費](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/arrival_replay.go)
+- [主lease・再生世代検証](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/display.go)、[停止／失効／運営retry](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/display_lifecycle.go)、[fallback](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/fallback.go)
+- [schema 020通知方針](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/migrations/020_push_after_arrival.sql)、[通知運用契約](https://github.com/Mino829/TRACE_B/blob/6b87961/README.md)
+- [Frontend到着／作品閲覧](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/components/ping-log/ray/arrival.tsx)、[到着後写真の端末限定保存](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/components/ping-log/ping-log-screen.tsx)

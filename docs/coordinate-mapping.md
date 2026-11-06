@@ -1,167 +1,114 @@
-# 位置座標・3D座標変換
+# 位置座標・3D座標変換（完成版）
+
+更新日: 2026-11-06
+
+基準: Frontend `be94bd2`／Backend `6b87961`。完成版の入力は新規GPSではなく、参加者が写真ごとに選んだ固定Graphのcheckpointである。新規位置取得→geofence→平滑化→公開位置表示という旧パイプラインは使わない。Graph内の地理座標や旧写真用処理が存在することを新規測位の仕様に読み替えない。
 
 ## 目的
 
-スマートフォンから得たWGS84緯度経度を、キャンパス3D空間内の安定したローカル座標へ変換する。測量用途の精度ではなく、歩行体験として自然に見えることを目標にする。
-
-写真撮影地点を記憶のアンカーとし、連続する写真の撮影時GPSとキャンパス経路グラフから歩行可能な経路を再構成する。通常GPSの点列は経路再構成へ流用しない。再構成経路は実測経路と同一とは限らないため、信頼度を表示へ反映する。
+撮影地点を自己申告の記憶アンカーとして、固定キャンパスGraph上の経路と3D Mapを一貫させる。再構成経路は参加者の実歩行履歴・測量結果・精密な現在位置ではない。本人端末の作品と展示の到着再生は別の導線を持ち、ローカル作品を開くために到着QRを必須にしない。
 
 ## 処理順序
 
-```text
-ブラウザ位置取得
-  -> 入力検証
-  -> キャンパス範囲判定
-  -> 異常ジャンプ除去
-  -> ローカル平面座標へ変換
-  -> キャンパス経路グラフへmap matching
-  -> 平滑化
-  -> 表示用量子化・ぼかし
-  -> WebSocket配信
+```mermaid
+flowchart LR
+    Place["建物 → 階 → 地点を選択"] --> ID[checkpointId]
+    ID --> Local["端末写真・PhotoPlace\n固定Graph版を保持"]
+    ID --> V2["到着前のみv2 metadata送信\ncheckpointId / capturedAt / clientPhotoId"]
+    V2 --> Check["Memory固定版・selectableを検証"]
+    Check --> Route["Graph最短経路\npathNodeIds"]
+    Route --> WS["到着時の公開metadata投影"]
+    WS --> Scene["node.threeD → toScene\nthree.js"]
+    Local --> Artwork["ローカル3D作品\n到着登録と独立"]
 ```
 
-生の緯度経度はGoまでとし、UnityまたはTouchDesignerにはローカル座標だけを送る。
+画像、座標、Graph版、role、selectableを写真POSTへ追加しない。Goは作成済みMemoryの版と自分の固定Graphを使用する。Frontendは到着後も端末撮影できるが、その追加写真metadataはGoへ送らない。
 
-## 基準点
+## 基準点と座標系
 
-キャンパス内に原点 `(lat0, lon0)` を1点設定する。原点は展示場または3Dモデル上で位置合わせしやすい地点を選ぶ。
+一つの座標をすべての用途へ転用せず、次を区別する。
 
-小規模なキャンパスでは、地球半径 `R = 6378137m` として次の近似を使用できる。
+| 座標 | 役割 |
+|---|---|
+| Graph `lat`／`lon` | 固定キャンパスのWGS84参照値。参加端末から新しく得た位置ではない |
+| Graph `local.east`／`local.north` | アプリのローカルENU平面メートル。Goの経路pathのx／zはeast／north |
+| Graph `threeD.x/y/z` | Blenderキャンパス座標、1単位=1m、Z上。階・階段・エスカレーター等の描画位置 |
+| three.js scene | GLBに合わせたY上座標。node IDを介してGraph threeDから変換 |
+| placesの地点選択図 | `places.json`のoriginを引いた小さい座標。選択結果はcheckpoint IDで保存 |
 
-```text
-east  = R * cos(lat0) * (lon - lon0)
-north = R * (lat - lat0)
-```
+Graphの最初のnodeは`classroom-entrance`、教室棟1F南面自動ドアに対応するアプリ原点。現在の固定値はlat 35.6607341、lon 139.7945577、local east 0.01／north 0.0。Backendは最初のnodeの地理／local値から参照変換を構成する。原点を会場到着地点ShibaLabと同一視しない。
 
-角度はラジアンで計算する。
-
-3Dモデルの向きに合わせて回転角 `theta` と縮尺 `scale` を適用する。
-
-```text
-x = scale * (east * cos(theta) - north * sin(theta)) + offsetX
-z = scale * (east * sin(theta) + north * cos(theta)) + offsetZ
-```
-
-MVPでは高さ `y` を固定する。階層や高低差を表現する場合は、QRチェックポイントなど別の情報から決定する。
-
-## キャリブレーション
-
-1. 3Dモデル上で確認しやすい地点を3か所以上選ぶ
-2. 各地点の緯度経度と3D座標を測る
-3. 原点、回転、縮尺、オフセットを求める
-4. 使用していない地点で誤差を確認する
-5. 設定値をバージョン付きJSONとして保存する
-
-キャリブレーションでは、使用していない検証点ごとの誤差と全点の中央値・95パーセンタイルを記録する。公開する設定ファイルに生の検証軌跡を含めない。3Dモデルを更新した場合はバージョンを変更し、旧設定へ戻せるようにする。
-
-```json
-{
-  "version": "campus-2026-01",
-  "origin": {"latitude": 35.0, "longitude": 135.0},
-  "rotationDegrees": 0,
-  "scale": 1,
-  "offset": {"x": 0, "z": 0}
-}
-```
-
-## 事前取得データを使った位置補正（検討案）
-
-リアルタイム位置の安定化策として、イベント前にキャンパス内の写真と撮影地点の位置データを集め、位置推定の参照データとして使う案がある。MVPの確定要件ではなく、効果と運用負荷を技術検証で確かめてから採否を決める。
-
-- 通路、建物入口、交差点などの基準地点ごとに、写真、基準座標、撮影方向、CampusNode / CampusEdgeとの対応を記録する
-- まずは基準座標を座標変換とCampusGraphの照合に使い、リアルタイムGPSの候補地点や通路を絞る方法を検討する
-- 写真の見た目も照合に使う場合は、参加者端末のカメラ画像と事前写真を照合する処理を別途追加する。位置データだけを使う方式とは分けて評価する
-- 基準座標はスマートフォンGPSの値をそのまま正解値とせず、既知の地点や検証済みの測量・地図座標と照らして誤差を記録する
-- 写真照合用のデータは、建物の角や入口など変わりにくい目印を中心に複数方向から集める。人、植栽、天候、照明、仮設物による見え方の差を想定し、必要ならイベント当日に状態を確認する
-- 照合の信頼度が低い場合は位置を無理に確定せず、既存のGPS・CampusGraph・QRチェックポイントへフォールバックする
-
-座標を参照するだけの方式では、景色の変化より基準座標とCampusGraphの精度が重要になる。画像の見た目を照合する方式では、景色、光、人や仮設物の変化で照合率が下がる可能性があるため、既存の位置推定との誤差・有効率を比較して採否を判断する。
-
-## 入力検証
-
-以下はMVPの仮値であり、実地試験で調整する。
-
-| 条件 | 仮値 | 処理 |
-|---|---:|---|
-| 推定誤差 | `accuracyM > 50m` | 表示更新を保留 |
-| 古い位置点 | 取得から60秒超 | 拒否 |
-| 未来時刻 | サーバー時刻より10秒超 | 受信時刻へ補正 |
-| 移動速度 | `8m/s`超 | 異常ジャンプ候補 |
-| キャンパス外 | geofence外 | 保存しない |
-
-誤差が大きい点を即座に0件扱いにせず、最後の有効位置を暫定30秒保持して表示の消失を防ぐ。
-
-- geofenceは建物輪郭やGPS誤差を踏まえた境界テストを行い、境界付近で保存と拒否が高速に揺れないようヒステリシスを検討する
-- `8m/s`超は直ちに拒否せず、前後点、精度、経過時間を合わせて判定する
-- 未来時刻を受信時刻へ補正した事実はフラグまたはメトリクスへ残し、元の不正時刻を描画順序へ使わない
-- 最後の有効位置を保持する具体時間は暫定30秒とし、超過後は参加者を表示から自然に消す
-
-## 平滑化
-
-MVPでは指数移動平均を第一候補とする。
+旧地理アンカーとGraph整合検査に使う近似式（角度差はラジアン）:
 
 ```text
-smoothed = alpha * current + (1 - alpha) * previous
+east  = originEast  + 6378137 * cos(originLat) * (lon - originLon)
+north = originNorth + 6378137 * (lat - originLat)
 ```
 
-- `alpha`は精度が良いほど大きくする
-- 1m未満の変化はデッドバンドとして無視する候補とする
-- 到着演出用の経路は、写真アンカー間の再構成結果を最大200点程度へ簡略化する
-- 急な方向転換を失わないよう、単純な平均だけでなく代表点を残す
-- 経路へのスナップは通行可能な導線データの品質を検証できた場合だけ使用し、立入禁止区域や建物内へ誤って寄せない
-- リアルタイム表示用と写真経路再構成用の加工を分け、同じ入力から再現可能なバージョン付き処理にする
+Backend Parseは各nodeのlocalとWGS84変換結果の差が0.3m以内かを検査する。これは固定データの内部整合検査であり、実地GPS精度の合格値ではない。
+
+## 3Dへの変換
+
+Frontend `src/lib/display/campus-graph.ts`の`toScene`はBlender XYの原点とZ上をGLBのY上へ変換する。
+
+```text
+origin = { x: -160.48048400878906, y: -14.865501403808594 }
+sceneX = threeD.x - origin.x
+sceneY = threeD.z
+sceneZ = -(threeD.y - origin.y)
+```
+
+このoriginはGLBの書出し基準であり、上のENU原点とは別物。Goのpath.x／zをこのBlender座標式へ直接代入しない。展示は`pathNodeIds`から同梱Graphのnode.threeDを引いて、`buildRoutePath`で経路を組み立てる。`/display/campus.glb`を読み、階・上下移動を含む3D上の経路として描く。新仕様を「全高さ固定」と説明しない（Goの平面pathと3D描画は別）。
+
+カメラ移動・エスカレーター／エレベーター演出・見やすさの平滑化は描画側の表現。新しいGPS平滑化や実移動速度の計測ではない。
 
 ## 写真地点と経路グラフ
 
-- 撮影操作時に位置APIから新しい位置を取得し、写真EXIFの位置を使用しない
-- 写真地点は最寄り頂点ではなく、原則としてGPS精度円内の通行可能な辺上へ投影する
-- 前後の写真地点を端点とし、A*またはDijkstraで距離、端点の吸着誤差、通行制約、不自然な折り返しを評価する
-- 写真地点間の最短経路は実測ではなく推定として表示する
-- 候補を決められない場合は直線を実歩行として扱わず、未確定区間として表現する
-- CampusGraph、座標変換、経路生成アルゴリズムに別々のバージョンを付ける
+- 新規写真はGraphに存在し、`selectable:true`が明示されたnodeだけ。roleがcheckpointかroomかwaypointかでは可否を決めない。unknown／false／null／属性欠落は400 `INVALID_CHECKPOINT`。
+- 内部経路nodeと到着証明の地点解決は`NodeIndex`を用い、写真の選択可能性とは分ける。到着地点や中継waypointすべてを新規写真選択肢にするわけではない。
+- `photo_moments`をcaptured_at、sequence_noで並べ、隣接写真間を`Graph.Connect`のDijkstraで接続する。algorithmは`checkpoint-dijkstra-1`。同一地点も正当な区間として扱う。
+- 辺のlengthMetresを重みにし、passable=false、restricted、closedを除外する。openingHours（JST曜日／時刻）とclosuresを含む場合、撮影区間全体で利用可能な辺だけにする。
+- checkpoint経路はGPS精度円・速度推定・候補snap競合を使わない。有効な最短経路は内部confidence high、逆時刻・不明node・接続不能はlow／空経路。highは自己申告地点間のGraph接続の評価で、実歩行の証明ではない。
+- 初回到着時、最後の写真が初回arrived_at以前なら、その写真→到着checkpointの区間を追加する。0枚は区間なし、1枚でも到着区間を作れる。再視聴時刻で経路を延ばさない。
+- 写真個別削除・追加で全隣接を同transactionで再構成する。版不一致の旧checkpointを現行位置へ読み替えない。
+
+公開描画の投影は、写真・区間の版、開始／終端写真、区間数と連続性を照合する。不足区間や連続しないpathを部分的な実軌跡としてつなぎ直さず、空経路にする。描画へ送る撮影情報はcheckpointId／capturedAtのみで、画像やMemory IDを含めない。
 
 ## 座標・グラフ・3D Mapの版同期
 
-すべての描画イベントとスナップショットへ`coordinateVersion`、`campusGraphVersion`、`threeDMapVersion`を付ける。Backendと描画機は公開設定にある一つの互換組み合わせだけを受け付け、不一致イベントを描画しない。切替は設定の公開、描画機の事前読込、ヘルス確認、Backendの配信切替の順に行い、直前の組み合わせへ即時ロールバックできるようにする。
+| 項目 | 同梱版 |
+|---|---|
+| coordinateVersion | `toyosu-2026-08-28.1` |
+| campusGraphVersion | `toyosu-graph-2026-10-29.1.draft` |
+| threeDMapVersion | `toyosu-3dmap-2026-10-30` |
 
-### 制作物と責任分界
+Graph名の`.draft`は実際の版文字列として維持し、「完成版」文書にするために勝手に変更しない。版名は大学／責任者の公開承認を表さない。
 
-| 制作物 | MVP形式 | 必須内容 | 主担当 |
-|---|---|---|---|
-| 座標変換設定 | バージョン付きJSON | 原点、回転、縮尺、offset、geofence、検証誤差 | 技術担当 |
-| CampusGraph | GeoJSONまたは同等のJSON | node、edge形状、距離、階段・屋内外・通行可否、版 | マップ担当＋技術担当 |
-| 3D Map | glTF/GLBを第一候補 | 同じ原点・向き・単位、主要建物と歩行面、版 | 3D担当 |
-| 通行止め設定 | 日時付きJSON | edge ID、開始・終了、理由、承認者 | 運営担当 |
-| 検証記録 | CSV/Markdown | 基準点、誤差中央値・p95、主要経路、承認版 | 試験担当 |
+Backendの固定JSONは`internal/route/campus_graph.json`、Frontendは`models/trace/campus_graph.json`。3種の版が設定と一致しなければBackendのGraph互換検査が拒否する。Memoryには受付時のGraph版を固定し、写真と区間にも版を保存する。本人v2 memoryはgraphVersionとpathNodeIdsを返す。新しいGraph配備で旧Session／写真の版を上書きしない。
 
-グラフと3D Mapは同じローカル座標系・メートル単位を使い、公開版を直接上書きしない。MVPでは高さを固定し、屋内階層や精密な建物内部は対象外とする。通行止めは描画だけでなく経路探索からも除外する。
+描画認証frame・送受信メッセージは3種の版を持つ。不一致は描画せず認証close／version rejectionとする。snapshotは参加者位置一覧でなく、現在の到着再生metadataとfallback。公開設定の版、Frontend同梱Graph、GoのJSON、GLBと生成placesを同じ互換組に揃える。旧bundleのnode IDが同名でも新座標へ解釈し直さない。
 
-## 写真ピンの座標処理
+## 制作物と責任分界
 
-写真撮影時GPSは通常GPSとは別に検証・変換し、5〜10mの空間bucketへ量子化する。公開イベントにはbucket中心、表示期限、三つの空間版だけを含める。写真、画像URL、生GPS、正確な時刻、MemorySession IDは含めない。同じbucketの有効な撮影が3件以上の場合だけフォトスポットを生成する。
+| 制作物 | 現行用途 |
+|---|---|
+| `models/trace/campus_graph.json` | 選択地点・内部node・辺・版・Blender座標の固定データ |
+| Backend埋込Graph | 入力selectable検証、版固定、経路再構成、旧地理アンカー互換 |
+| `places.json` | 建物・階・地点選択用の生成済みデータ、PhotoPlaceの版照合 |
+| `/display/campus.glb` | three.jsの固定3Dキャンパス |
+| `campus-graph.ts`／`route-path.ts` | node ID→scene変換・3D経路、合成展示の経路補助 |
 
-詳細は[写真メモリー・経路再構成仕様](photo-memory.md)を正とする。
+地図・Graph・モデルのコードは存在するが、実地の通行可能性、誤差、端末／投影機材の試験合格を本書は報告しない。再展示時の現地変更・互換版切替・公開承認は別の確認事項である。
 
-## 表示上のプライバシー
+## 旧GPS互換と表示上のプライバシー
 
-- リアルタイム表示は5〜10m単位へ量子化する候補とする
-- セッションごとに小さな固定オフセットを加え、正確な現在地を示さない
-- `accuracyM`が大きい場合は光を広げるなど、不確実性を表現へ変換する
-- 生の緯度経度をログ、WebSocket、スクリーンショットへ出さない
-- 同時表示人数が少なく個人の行動を推測しやすい場合は、個別表示の遅延、集合化、非表示を選択できるようにする
+旧`photos`に保存されたGPS由来区間は本人閲覧・削除のために保持し、`photo-edges-dijkstra-1`による旧辺投影・推定処理を残す。新規device metadataにGPS列や新規位置を追加しない。端末の旧精度記録も再送しない。
 
-## 実地試験項目
+旧Liveの最新位置キャッシュはTTL清掃対象のみ。新規位置書込も描画へのposition投影もない。写真pin／hotspotの量子化・集計は現行機能ではない。公開画面が示すのは自己申告地点間の再構成で、写真画像・URL・生GPS・本人資格を送らない。ただし撮影地点と時刻自体は公開metadataになるため「画像を送らない＝行動情報が一切ない」と説明しない。
 
-- iOS / Android各2機種以上
-- 学内Wi-Fiとモバイル回線
-- 正門、建物沿い、屋内、展示場入口
-- 画面表示中、画面ロック、アプリ切り替え
-- 5秒、10秒、15秒間隔の精度・電池・通信量比較
-- 同じ経路を複数回歩いたときの再現性
-- 境界を出入りする経路、停止、走行、自転車、時刻ずれ、位置偽装入力
-- 既知の検証点に対する中央値・p95誤差、有効点率、最大欠測時間
-- 写真地点の辺への吸着正解率、再構成経路の辺一致率、信頼度と実誤差の対応
-- 同距離の複数経路、写真アンカー欠損、階段・建物入口・通行止め
-- 座標・グラフ・3D Mapの版不一致拒否、切替、直前版へのロールバック
+## 実装参照
 
-具体的な合格値は[試験計画・公開判定基準](test-plan.md)で管理する。
+- [Backend固定Graph](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/route/campus_graph.json)、[Parse／Compatible／PhotoCheckpointNode／Connect](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/route/route.go)
+- [撮影順・到着終端・版不一致](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/photo_moments.go)、[公開経路の完全性検査](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/display.go)
+- [Frontend Graph・toScene](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/lib/display/campus-graph.ts)、[3D経路](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/lib/display/route-path.ts)、[GLB描画](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/lib/display/player.ts)
+- [地点選択・PhotoPlace型](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/lib/places/types.ts)、[同梱版と会期中記録](https://github.com/Mino829/TRACE_F/blob/be94bd2/README.md)

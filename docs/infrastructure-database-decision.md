@@ -1,135 +1,101 @@
-# インフラ・データベース方針
+# インフラ・データベース方針（完成版）
 
-- 決定日: 2026-10-21（Issue #10の技術配置方針を更新）
-- 状態: 採用する技術構成。大学の提供者・処理地域・保存期間承認、予算確認、公開経路の実証は未完了。配備・受付開始を許可する決定ではない
-- 対象: MVP、ステージング、本番
+- 更新日: 2026-11-06
+- 対象: 会期終了時点の実装、保守・期限清掃・安全な終了判断
+- 基準: Frontend `be94bd2`、Backend `6b87961`。コード・設定・過去の配備記録と、現在の稼働・大学承認・実機受入は区別する
 
-従来のVercel + Google Cloud方針を、稼働中の静的Webと同一オリジン中継を活かすCloudflare Workers + Google Cloud東京へ変更する。[比較の記録](cloudflare-web-backend-option.md)を参照。
+会期（2026-10-31〜11-01）は終了した。再展示は未定。現在の受付・通知・清掃・課金・資源停止の実績は未確認であり、本改訂は実環境を変更しない。[終了手順](deployment-operations.md#終了手順)を運用上の入口とする。
 
 ## 決定
 
-1. Next.jsを静的書き出しし、参加者画面、`/log`、`/display`のWeb配信先をCloudflareのサイトWorkerとする。画面機能の実装完了を意味しない
-2. Go BackendはOCI互換コンテナをGoogle Cloud東京（`asia-northeast1`）のCloud Runに配置する技術方針とする。AWS東京は大学審査等で変更が必要になった場合の再決定先であり、現行の採用先ではない
-3. 本番の正本DBは東京のCloud SQL for PostgreSQL 17、加工済み写真は東京の非公開Cloud Storage bucketとする。DBにはオブジェクトキー、状態、ハッシュ、寸法、削除期限だけを保存する
-4. 通常GPSの量子化済み最新表示位置は単一Go Backendインスタンスのプロセスメモリに30〜60秒TTLで保持する。PostgreSQLの`live_positions`を使用せず、複数Backendへ拡張するときだけRedis互換の共有TTLストアへ移す
-5. 会場のUnity / TouchDesignerはGo Backendへ外向きWSS接続を行い、学内ネットワークから会場PCへの受信ポート開放を前提としない。接続の認証経路は描画実装・検証前に確定する
+1. Next.js静的書き出しをCloudflareサイトWorker `trace-production`で配信する。参加・写真・本人作品は`/log`、展示はthree.jsの`/display`、旧参加の状態・停止・削除は`/`で扱う。
+2. Go API・直接WSSはGoogle Cloud東京（`asia-northeast1`）のCloud Run、正本DBはCloud SQL for PostgreSQL 17。会期中の独立本番は`trace-fes-2026`への配備記録がある。これを現在の稼働確認とはしない。
+3. 新規写真画像は端末のIndexedDBだけに保存する。Go `/v2`へ送る写真入力は`clientPhotoId`、自己申告の`checkpointId`、`capturedAt`のみ。画像、GPS、画像URL、画像ハッシュ・寸法等を送らない。新規画像のGCS uploadは停止している。
+4. 新規GPS取得・送信、LivePresenceSession新規作成、既存Liveの位置書込み・on_site継続は停止。旧Liveと旧GCS写真は各`deleteAfter`まで本人閲覧・停止・削除と期限清掃を維持する。
+5. 単一Goインスタンス・新旧revisionの書込み非並存を維持する。到着FIFO・単一主描画機lease・運営制御はDBに永続化する。旧位置キャッシュはGoメモリのTTLのみで、現行描画には配信しない。
 
 ## 採用理由
 
-- 稼働中のCloudflare配信とサイトWorkerの同一オリジンAPI中継を再利用でき、Vercel用の別のWeb実行環境を増やさない
-- Go Backendをコンテナ化することで、変更が必要になった場合も移植可能性を残す
-- 正本DBと写真保存をGoogle Cloud東京にまとめられる。ただしCloudflareを通る通信・ログや調査用D1/KVの処理・保存まで東京と保証するものではない
-- SQLiteの単一ディスク制約を避け、複数Backend、接続プール、バックアップ、復旧へ段階的に拡張できる
-- 標準PostgreSQLを使用することで、提供者固有機能への依存と移行コストを抑えられる
+Cloudflareの静的配信と同一origin中継を活かし、Go/PostgreSQLの正本を東京に維持する。端末内写真への切替で新しい画像転送・クラウド画像保存をなくしたが、地点と時刻のmetadataにも行動推測のリスクが残る。DB・旧bucketが東京でも、Cloudflare通信・ログ、Google認証、Push配信の全処理が東京になるわけではない。[比較履歴](cloudflare-web-backend-option.md)は現行の代替配置指示ではない。
 
 ## 配置対応
 
-| 領域 | 採用構成 | 変更時の再検討先 |
-|---|---|---|
-| Next.js静的Web・同一オリジン中継 | CloudflareサイトWorker | Vercel（再設計が必要） |
-| Go API・WebSocket | Cloud Run（東京） | AWS東京のコンテナ実行環境 |
-| 正本DB | Cloud SQL for PostgreSQL 17（東京） | RDS for PostgreSQL（東京） |
-| 写真 | Cloud Storage private bucket（東京） | S3 private bucket（東京） |
-| 複数Backend化時の共有状態（MVPでは未使用） | Redis互換ストア等を再検討 | 同左 |
-| 監視 | Cloudflare側のWorker監視とCloud Monitoring / Logging | 再検討 |
+| 領域 | 現行構成・役割 |
+|---|---|
+| Web・中継 | `https://trace-production.async5855.workers.dev`、サイトWorker |
+| Go API・描画WSS | Cloud Run東京。公開設定のGo URLは`https://trace-backend-350621330046.asia-northeast1.run.app` |
+| 正本DB | Cloud SQL for PostgreSQL 17東京、参加・同意・metadata・経路・到着・lease・運営制御・暗号化Push購読 |
+| 新規写真 | 参加端末IndexedDB。サーバーバックアップも別端末への自動移行もない |
+| 旧写真 | 東京の非公開Cloud Storage。旧画像と署名PUTのfence/outboxがなくなるまで保守 |
+| 期限清掃 | 対応版APIの清掃、Cloud Run Job＋Cloud Scheduler。実稼働・最終成功は別途確認 |
+| 通知 | 任意のGo Web Push、30分のみ。旧`trace-push` Workerとは独立 |
+| 認証・秘密 | Google本人確認、Secret Manager、実行サービスアカウント、Worker secret binding |
 
-AWSへの切替は別途提供者・保存地域・費用・経路の承認を要する。
+旧`trace-log`・`trace-push`・調査D1/KV、閉鎖staging `trace-staging-async5855`は独立した対象で、本番配備による更新・移行先ではない。AWS、Vercel、Redisは現行の採用先ではない。
 
 ## 環境分離と公開手順
 
-| 環境 | 用途 | データ |
-|---|---|---|
-| local | 開発・単体試験 | 合成データだけ |
-| staging | 実機、会場、負荷、削除、ロールバック試験 | 合成データを原則とし、承認済みの試験データだけ |
-| production | 公開展示 | 参加者データを扱う唯一の環境 |
-
-- CloudflareのプレビューとサイトWorkerのstagingを本番から分離し、BackendとDB migrationを先にstagingで検証する。既存stagingはIAM保護中で、Workerからの参加者E2Eは未実施
-- BackendとDB migrationは先にstagingへ配置し、Web、Go、描画機を含むE2E試験後に同じ成果物をproductionへ昇格する
-- productionは`main`へのpushだけで自動公開せず、技術責任者の承認を必要とする
-- Web、Goコンテナ、DB schema、WebSocket schema、CampusGraph、座標変換、3D Mapの版を一つのrelease manifestへ記録する
-- T-1週以降は緊急修正以外を停止し、直前安定版のWorker配信、Go container image、migration状態、描画ビルドを保持する
-- 本番データをlocalまたはstagingへコピーしない
+- localは合成データ・使い捨てDB。stagingとproductionの資格・DB・bucketを混ぜず、本番データを開発へコピーしない。
+- Frontendはmain pushの検証workflow成功後、`Production` environmentで検証済みSHAをbuild・検証して`trace-production`だけへ自動配備するコードがある。手動workflowは明示`ref`必須、既定は検証だけ、公開は`deploy=true`が必要。会期終了で自動配備が無効になったとは扱わない。
+- Backendのmain push後自動更新はテスト成功、対象repository、`STAGING_DEPLOY_ENABLED=true`等を条件とする**閉鎖staging専用**。WIF認証、schema baseline照合、候補ready、清掃job、traffic切替を行う。これを`trace-fes-2026`本番自動配備と読み替えない。
+- 現在のGitHub environment承認設定・実権限・CI有効状態は未確認。コードや文書のmain反映前に配備対象を確認する。技術的配備成功は公開承認ではない。
+- 固定公開設定、Web SHA、Go image、DB schema、Graph JSON本体、座標・Graph・3D Map版、秘密の参照版を切替記録に残す。秘密値は記録しない。
 
 ## 公開経路と責任境界
 
-- ブラウザは同一オリジンの`/api/backend/*`へHTTPSで送信する。サイトWorkerは許可したメソッド・パス・ヘッダーのみをGoへ転送し、`X-Trace-Edge-Secret`をサーバー側で付与する。参加者Bearerは個別API認証として転送し、edge secretとは混同しない
-- 写真のメタデータ登録・完了APIはWorker中継の対象へ追加する必要がある。画像本体は[写真API契約](api.md#写真撮影保存)どおり短期署名URLへの直接PUTであり、現行Workerの16KB JSON中継で5MB画像を転送しない。Cloud StorageのCORS、署名URLの権限・期限、削除・地域、Workerの許可リストを写真公開前に検証する
-- Cloud Runの`/v1/*`はedge secretが設定されたとき不一致を403で拒否する。公開用ではSecret Managerの数値版とWorker secretを設定必須とし、参加者Bearer、Go側レート制限、受付停止も維持する。共有secretはIAMではない。Cloud Runを一般到達可能にする変更は大学承認と直接到達拒否試験の後に限る
-- CI・運営のCloud Run操作はIAMで制御する。IAM保護中のstagingにWorkerの共有secretだけで到達することはできない。検証用の安全な経路ができるまでstagingは非公開のままにする
-- 描画用WSSは現行WorkerのHTTP中継対象外。描画機へedge secretを配らず、描画専用資格情報・接続先・再接続手順を[Frontend #36](https://github.com/Mino829/TRACE_F/issues/36)と合わせて設計し疎通試験するまで本番公開しない
-- CloudflareのWorker・通信経路とアクセスログには参加者のIPやリクエストが触れ得る。Cloud SQL/Cloud Storageを東京に置くことと、全処理が東京で行われることは同義でない。`trace-push`のD1/KVは調査デモ用であり本番の写真・通知購読の正本には流用しない。各サービスの処理地域・ログ保持は大学の審査対象とする
+| 経路 | 認証・制限 |
+|---|---|
+| 同一origin `/api/backend/*` | サイトWorkerの許可パス・メソッドと16KiB JSON上限。参加Bearerはheader、WorkerがEdge secretを付与 |
+| 同一origin `/api/operator/*` | **一般管理proxyではない**。個人運営資格の発行・現在/全資格失効・到着proof取得だけを許可 |
+| Go `POST /v1/operator/display-tokens` | Google ID token・描画専用Origin/allowlistで直接認証。Edge secret不要 |
+| Go `/v1/display/ws` | ブラウザから直接WSS、最初の`renderer.authenticate`で短命displayToken・3版を検証 |
+| status・受付close・通知stop・fallback等 | 個人operator Bearer・許可Origin・Edge保護を備えた別の認可済み運営入口が必要。公開サイトbridgeには追加されていない |
+
+- 本番展示PCはブラウザとGoogleログインを使い、Node.js・gcloud・loopback brokerは不要。loopbackは旧リハーサルの別経路。
+- Google ID tokenから得るoperator credentialとdisplayTokenは別資格。参加者Bearer、Edge secret、到着proof鍵、display署名鍵、Push VAPID秘密鍵、購読暗号化鍵を兼用しない。運営資格はタブメモリだけ、秘密鍵はサーバー側だけ。
+- Workerは正規の`CF-Connecting-IP`だけを単一`X-Trace-Client-IP`へ変換し、ブラウザの転送IPを捨てる。GoはEdge secret一致時だけ転送IPを信頼する。Edge secretはIAMや本人認証の代わりではない。
+- IAM非公開Goへ共有secretだけで到達できない。一般到達性、OAuth Origin、公開承認、TLS/IAMの実確認を設定ファイルの存在から推定しない。
 
 ## PostgreSQL設計原則
 
 ### 型・制約
 
-- セッション、写真、経路等のdomain entityの主キーと外部キーは既存のプレフィックス付き不透明な`text` IDを保持する。UUIDv7やPostgreSQL `uuid`型への移行は行わない
-- 外部へ公開しない追加の連番が必要な監査・集計テーブルだけ、`bigint generated always as identity`を使用できる
-- 時刻は`timestamp with time zone`としてUTCで保存する
-- 状態値は`text`と`check`制約を基本とし、不正な状態をDBでも拒否する
-- 外部キー列には参照・削除で使用するインデックスを作る
-- 参加トークン、Push endpoint、写真URL、生GPS履歴を主キーや公開識別子へ使用しない
-- `memory_sessions`と`live_presence_sessions`それぞれに`expires_at`と`delete_after`を持ち、期限が異なり得る。`expires_at`後は位置送信を停止しても、本人の状態・閲覧・削除は各`delete_after`まで受け付ける。保持期間は大学のプライバシー審査（#9）待ち
+- IDは既存のプレフィックス付き不透明`text`、時刻はUTCの`timestamptz`。ランダムIDでもmetadataを完全匿名とは扱わない。
+- 新規Memoryには受付時のGraph版と写真modeを固定。保存済み版・同意・期限を後付け更新しない。地点・経路は固定Graphに対する自己申告の再構成であり、GPS実測履歴ではない。
+- 同内容再送・競合・写真削除をDB transactionで整合させる。削除済み`clientPhotoId`のfenceはMemoryの`deleteAfter`まで残し、遅延再送で復活させない。
+- Memoryと旧Liveは独立した`expiresAt`・`deleteAfter`・Bearerを持つ。参加期限・停止後も削除期限内の本人閲覧・削除を維持する。
+- 初回到着と完了後新QRによる本人再視聴は別操作・別receipt。再視聴は新公開再生IDでFIFO末尾へ入り、初回到着時刻・期限・通知方針を書き換えない。
 
 ### 接続管理
 
-- Goはリクエストごとに新規接続せず、上限付きの接続プールを共有する
-- DBの最大接続数から運用・migration用の予約枠を除き、`Backend最大インスタンス数 × 1インスタンス当たり最大接続数`が予算を超えないようにする
-- Cloud Runの自動拡張には最大インスタンス数を設定する。必要になった場合はPgBouncer、Cloud SQL接続プール、RDS Proxy等を評価する
-- connection数、待機接続、長時間query、lock待ちを監視する
+Goは上限付き接続poolを共有する。Cloud Run最大1とDB管理/migration用接続の予約枠を維持し、接続数・待機・長時間query・lockを確認する。プロセスメモリのレート制限は複数インスタンスで共有されないため、scale-outを構成変更だけで実施しない。
 
 ### インデックスと期限処理
 
-- すべての外部キー列を索引対象として確認する
-- `delete_after`、`expires_at`、到着キュー、写真処理キューは実際の抽出条件に合わせたインデックスを作る
-- `pending`、`deleting`等の少数状態だけを走査する処理には、状態を限定した部分インデックスを使用する
-- 複数workerで期限削除や写真処理を行う段階では、短いトランザクションと`FOR UPDATE SKIP LOCKED`で同じjobの二重取得を防ぐ
-- 参加者データを日付でpartitionする設計はMVPでは導入せず、実測した件数、削除時間、VACUUM状況から必要性を判断する
+期限、FIFO、状態、所有者による照会・削除を索引とtransactionで扱う。待機は有効Memory最大50件（playingを除く）、playingは全体で1件。pending写真の開始待ちは最大15秒、通常待機30秒を理由にskipしない。DBの主leaseを持つ描画機だけが先頭開始を要求できる。切断等で失敗した再生は自動で別機に再実行せず、既存の運営retry契約で扱う。
 
 ### migration
 
-- schema migrationは連番ファイルとしてGitで管理し、適用済みmigrationを変更しない
-- production起動時にアプリが破壊的migrationを自動実行しない
-- 列追加、両版対応、データ移行、旧列削除の順で後方互換を保つexpand-contract方式を使う
-- migration適用、ready確認、アプリ公開を分け、失敗時にWebとGoを直前の互換版へ戻せるようにする
-- 大規模な制約追加やindex作成はlock時間をstagingで測り、公開時間外に実行する
-- Backendの`002_remove_live_positions.sql`は旧APIのテーブル参照と非互換の例外である。位置受付を止め、旧API・清掃ジョブを停止した上で適用し、同じschema版の新APIのみ起動する。旧バイナリへの単純なrollbackはできず、既存表示位置は破棄する。承認とstagingでの初回・差分移行検証なしに公開中のDBへ適用しない
+- 埋め込み連番SQLを明示実行し、適用済みSQLを変更しない。現行は020まで。API・清掃はDBの連続履歴と対応最終版の一致を要求し、実行ユーザーへschema変更権限を与えない。
+- `migrate`は終了・清掃操作ではない。非互換変更は受付停止、キュー整理、旧API/清掃停止、承認済みbackup、migration、runtime権限、対応版readyの順で切り替える。旧版へ単純rollbackしない。
+- 019の再視聴ID/FIFO列や020の到着後通知を含め、API・dispatcher・cleanupを同じ対応版にする。020は既存Memoryの通知方針をtrueにしない。新同意版に固定された新規Memoryだけが到着後通知継続対象となる。
 
 ## 拡張段階
 
-### Stage 1: MVP
-
-- Go BackendのAPIとWebSocketは単一の稼働インスタンスに限定する。Cloud Runの最大インスタンス数を1とし、新旧revision並存にも注意する。当日の最小1は性能試験と費用承認後に設定し、展示時間外の最小数は運用計画で判断する
-- PostgreSQLは単一のマネージド主系を正本とするが、最新表示位置を保存しない
-- 最新表示位置はGoメモリへ30〜60秒TTLで保持し、再起動時は次の位置送信から再構成する。既存のPostgreSQL `live_positions`はBackendの002 migrationで除去する必要がある。設計記載はmigration実施を意味しない
-- 50同時追跡、5秒間隔、60セッション相当を負荷試験する
-
-### Stage 2: 複数Backend
-
-- Go Backendを複数インスタンスへ拡張する
-- 最新表示位置、WebSocket配信fan-out、短期leaseをRedis互換ストアまたはメッセージ基盤へ分離する
-- 到着演出の主描画機leaseとjob取得を共有状態で一意にする
-- PostgreSQLの接続プールと最大インスタンス数を同時に調整する
-
-### Stage 3: 高可用性
-
-- DBの高可用性構成と復旧訓練を費用・可用性要件に応じて評価する。PITRはMVPからの方針（下記バックアップ参照）
-- read replicaは読み取り負荷の実測後にだけ導入する
-- 複数リージョン化は大学のデータ配置承認、障害目標、費用が必要になった場合に別決定とする
+完成版は単一Backend。複数Backend、共有レート制限・fan-out、可用性拡張は再展示と実測需要が確定してから別設計とする。DB leaseがあることだけでscale-out全体が成立したとはしない。
 
 ## バックアップ・削除
 
-- PostgreSQLの自動バックアップとpoint-in-time recoveryをMVPから使用する方針とし、保持上限を7日とする。費用・削除保証・大学承認に合わなければ受付開始せず再設計する
-- 生GPS履歴をバックアップ対象へ入れない。バックアップ設定、リージョン、削除と復旧試験は公開前に確認する
-- 写真bucketの公開アクセスと一覧取得を禁止し、加工済み写真のversioningと別系統バックアップは原則無効にする
-- DB削除とオブジェクト削除を冪等なjobとして扱い、片方が失敗した場合は`deleting`状態から再試行する
-- 削除期限超過、object削除失敗、バックアップ世代削除失敗をアラートする
+- DB自動backup/PITRの上限7日は旧方針の提案値であり、現設定・承認・世代削除実績は未確認。保持上限・復元時再削除・費用を課金/個人情報担当と確認する。
+- 旧bucketは非公開、一覧禁止。起動時検査は東京、uniform access、public access prevention、versioning/soft delete/hold等の無効を要求する。これも実bucket設定の今回確認ではない。
+- 旧署名PUTは発行後すぐ失効できない。削除ではゼロバイトfenceを置き、URL期限後にoutboxから再消去する。旧画像/fenceが残る間はAPIと清掃のGCS設定・権限を外さない。
+- サーバーmetadata・画像清掃成功と、閉じた参加端末のIndexedDB画像消去は別。本人操作・清掃・backups・端末写真を分けて記録する。
 
 ## 残る決定
 
-- CloudflareとGoogle Cloud東京の利用、Cloudflare側の処理・ログ・D1/KVの扱いに関する大学承認。承認されない場合は公開せず代替案を再決定する
-- PostgreSQL 17の可用性構成・instance size・接続上限、実測の性能と復旧時間
-- 保存期間・バックアップ/PITR保持の個人情報承認と削除保証
-- 独自ドメイン購入、Cloudflare DNS/TLS、WAF/レート制限、監視・通知の設定と責任者の確認。企画・課金責任者はMino829、技術・個人情報の承認者はproject-planに従い未決
-- Cloud Run、Cloud SQL、Cloud Storage、Cloudflare、通信、ドメインの費用見積もり。予算上限5,000円は課金責任者が定めた企画上限であり、予算アラートは課金停止を保証しない。上限内の承認がなければ新規課金・実データ受付を行わない
-- 複数Backend化を開始する負荷・接続数・障害要件の閾値
+現在の停止状態、期限清掃成功、旧画像/fence残数、backup/PITR保持、正式な同意・大学承認、運用責任者・会期後窓口、実機受入は未確認。費用上限5,000円は企画上の上限で、実費・停止済みの証跡ではない。Backend #53の共通アカウントGCP停止は完了未確認。本人権利と清掃依存を満たす前に資源を消さない。
+
+## 参照実装
+
+- [Frontend本番設定](https://github.com/Mino829/TRACE_F/blob/be94bd2/push-worker/production.public.json)、[サイトWorker](https://github.com/Mino829/TRACE_F/blob/be94bd2/push-worker/src/site.ts)、[Frontend配備workflow](https://github.com/Mino829/TRACE_F/blob/be94bd2/.github/workflows/deploy.yml)
+- [Backend README（写真・運営・清掃・migration）](https://github.com/Mino829/TRACE_B/blob/6b87961/README.md)、[Backend staging workflow](https://github.com/Mino829/TRACE_B/blob/6b87961/.github/workflows/test.yaml)
