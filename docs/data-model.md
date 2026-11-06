@@ -1,370 +1,208 @@
-# データモデル
+# データモデル（完成版）
+
+更新日: 2026-11-06
+
+Backend `6b87961`のmigration `001`〜`020`適用後の物理モデルを記録する。ここに記載したschemaが実環境へ適用済みという意味ではない。旧論理案のPhotoAsset、PhotoHotspotBucket、CampusNode等を実在テーブルとして扱わない。
 
 ## 方針
 
-- 本番の正本DBはMVPからマネージドPostgreSQLとする。Google CloudではCloud SQL、AWSではRDSを使用し、標準PostgreSQLの範囲を基本として移植性を保つ
-- 写真バイト列はPostgreSQLへ入れず、非公開オブジェクトストレージへ保存する
-- ER図は論理モデルを表す。`LIVE_POSITION`は永続テーブルではなく、単一Go BackendプロセスのメモリにLivePresenceSessionごとの最新1件を30〜60秒TTLで保持する。複数Backend化するときだけRedis互換TTLストアへ移す。PostgreSQLの`live_positions`は使用しない
-- 個人名、学籍番号、メールアドレス、端末固有IDを保存しない
-- 写真用MemorySessionとリアルタイム用LivePresenceSessionを別ID・別トークン・別同意版で管理する
-- 両体験を同じ端末で使う場合だけ、ExperienceLinkで色・記号、到着処理、本人向け状態表示を連携する。連携トークンの有効期間は短くし、読み取りのための最小限の関連付けは削除期限まで維持する
-- 通常GPSの生緯度経度と点列は永続化せず、量子化済みの最新表示位置だけを30〜60秒保持する
-- 写真撮影時GPSはPhotoMomentのアンカーとして写真と同じ期限まで保持する
-- 追跡状態と到着演出状態を分離し、一つの状態値に混在させない
-- 各セッションの`expires_at`（追跡操作の期限）と`delete_after`（保存データの削除期限）を分離し、追跡失効後も本人の読み取り・自己削除を各`delete_after`まで許可する。期間は大学のプライバシー承認（#9）待ち
+- PostgreSQL 17をサーバーの正本とし、新規device写真の画像本体は参加端末にだけ保存する。
+- Memoryと旧Liveは別ID・別token hash・別同意・別期限。新規Liveは発行しない。既存の本人照会・停止・削除は維持する。
+- `expires_at`は参加／新規操作の期限、`delete_after`は本人閲覧・自己削除の期限とサーバー保存削除期限。停止・到着・再視聴で書き換えない。
+- 新規deviceと旧legacyは`memory_sessions.photo_mode`で固定する。既存行のmigration既定値はlegacy。device写真metadataを旧GCS写真の行へ入れない。
+- セッション・写真等は不透明なtext ID。例外として旧Liveの`display_id`はmigration 007のUUID。監査IDはDB生成bigint。日時はTIMESTAMPTZ。
+- 参加者の氏名・学籍番号・メールは収集しない。運営本人認証ではGoogle subjectと正規化メール由来の照合hashを持つ。hashを完全匿名化と呼ばない。
 
 ## ER図
 
-図中の`string id`は論理識別子の表記である。セッション、写真、経路等の識別子と参照先は既存の推測困難なプレフィックス付き不透明IDを維持し、PostgreSQLでは`text`型で揃える。UUIDv7や`uuid`型への変更は行わない。`LIVE_POSITION`だけはER図内の論理エンティティであり、PostgreSQLのテーブル・外部キーではない。
+以下は**実在テーブルの主要FKだけ**を示す。列は説明に必要な抜粋で、完全DDLはmigrationを正とする。写真のdevice／legacy混在、架空の独立photo_assets、DBにないGraph表を描かない。
 
 ```mermaid
 erDiagram
-    MEMORY_SESSION ||--o| EXPERIENCE_LINK : optionally_links
-    LIVE_PRESENCE_SESSION ||--o| EXPERIENCE_LINK : optionally_links
-    LIVE_PRESENCE_SESSION ||--o| LIVE_POSITION : presents
-    MEMORY_SESSION ||--o| ARRIVAL_EVENT : reaches
-    MEMORY_SESSION ||--o{ PHOTO_MOMENT : captures
-    MEMORY_SESSION ||--o{ ROUTE_SEGMENT : reconstructs
-    MEMORY_SESSION ||--o| PUSH_SUBSCRIPTION : enables
-    PHOTO_MOMENT ||--|| PHOTO_ASSET : owns
-    PHOTO_MOMENT }o--o{ PHOTO_HOTSPOT_BUCKET : contributes_to
-    CAMPUS_NODE ||--o{ CAMPUS_EDGE : connects
+    memory_sessions ||--o| experiences : owns
+    live_presence_sessions o|--o| experiences : legacy_reference
+    memory_sessions ||--o| experience_links : legacy_link
+    live_presence_sessions ||--o| experience_links : legacy_link
+    memory_sessions ||--o{ photo_moments : device
+    memory_sessions ||--o{ photo_moment_fences : prevents_recreation
+    memory_sessions ||--o{ moment_route_segments : device_routes
+    photo_moments ||--o{ moment_route_segments : from_or_to
+    memory_sessions ||--o{ photos : legacy
+    photos ||--o{ route_segments : from_or_to
+    memory_sessions ||--o{ route_segments : legacy_routes
+    memory_sessions ||--o| arrival_events : first_arrival
+    memory_sessions ||--o{ arrival_receipts : initial_receipts
+    memory_sessions ||--o{ arrival_replay_receipts : replay_receipts
+    memory_sessions ||--o{ arrival_proof_uses : consumed_proofs
+    memory_sessions ||--o| push_subscriptions : optional
+    memory_sessions o|--o{ idempotency_records : optional_owner
 
-    MEMORY_SESSION {
-        string id PK
-        string consent_version
-        string consent_language
-        string token_hash
-        string display_alias
-        datetime consented_at
-        datetime started_at
-        datetime expires_at
-        datetime delete_after
-        datetime created_at
+    memory_sessions {
+        text id PK
+        text token_hash
+        text consent_version
+        text consent_language
+        text photo_mode
+        text campus_graph_version
+        boolean deleting
+        integer photo_sequence
+        boolean push_stopped
+        boolean push_after_arrival
+        timestamptz stopped_at
+        timestamptz created_at
+        timestamptz expires_at
+        timestamptz delete_after
     }
-
-    LIVE_PRESENCE_SESSION {
-        string id PK
-        string tracking_status
-        string presence_phase
-        string consent_version
-        string on_site_consent_version
-        string token_hash
-        string display_alias
-        datetime started_at
-        datetime stopped_at
-        datetime expires_at
-        datetime delete_after
-        datetime last_seen_at
-    }
-
-    EXPERIENCE_LINK {
-        string id PK
-        string memory_session_id FK
-        string live_presence_session_id FK
-        string link_token_hash
-        datetime link_token_expires_at
-        datetime expires_at
-    }
-
-    LIVE_POSITION {
-        string live_presence_session_id PK
-        float accuracy_m
-        float local_x
-        float local_z
-        datetime recorded_at
-        datetime received_at
-        datetime expires_at
-    }
-
-    PUSH_SUBSCRIPTION {
-        string memory_session_id PK
-        string endpoint_encrypted
-        string keys_encrypted
-        integer interval_minutes
-        string status
-        datetime next_send_at
-        datetime expires_at
-    }
-
-    ARRIVAL_EVENT {
-        string id PK
-        string memory_session_id FK
-        string source
-        string checkpoint_id
-        string replay_status
-        datetime arrived_at
-        datetime replay_started_at
-        datetime replay_finished_at
-    }
-
-    PHOTO_MOMENT {
-        string id PK
-        string memory_session_id FK
-        string photo_asset_id FK
+    photo_moments {
+        text id PK
+        text id_hash UK
+        text memory_session_id FK
+        text client_photo_id
+        text request_hash
+        text checkpoint_id
+        text campus_graph_version
+        timestamptz captured_at
         integer sequence_no
-        float latitude
-        float longitude
-        float accuracy_m
-        string location_source
-        string snapped_edge_id
-        float local_x
-        float local_z
-        datetime captured_at
-        datetime created_at
     }
-
-    PHOTO_ASSET {
-        string id PK
-        string object_key
-        string content_hash
-        string mime_type
-        integer width
-        integer height
-        integer size_bytes
-        string status
-        string visual_features
-        datetime delete_after
-        datetime created_at
+    photos {
+        text id PK
+        text memory_session_id FK
+        text client_photo_id
+        text status
+        text stage_key
+        text object_key
+        timestamptz captured_at
+        timestamptz delete_after
     }
-
-    ROUTE_SEGMENT {
-        string id PK
-        string memory_session_id FK
-        string from_photo_id FK
-        string to_anchor_type
-        string to_anchor_id
-        string graph_version
-        string confidence
-        string path_local_points
-        float length_m
-        datetime started_at
-        datetime ended_at
-    }
-
-    PHOTO_HOTSPOT_BUCKET {
-        string id PK
-        string coordinate_version
-        string three_d_map_version
-        string spatial_bucket_id
-        integer active_photo_count
-        datetime window_started_at
-        datetime expires_at
-    }
-
-    CAMPUS_NODE {
-        string id PK
-        string graph_version
-        string node_type
-        float local_x
-        float local_z
-    }
-
-    CAMPUS_EDGE {
-        string id PK
-        string graph_version
-        string from_node_id FK
-        string to_node_id FK
-        string path_points
-        float length_m
-        string attributes
-        boolean enabled
-    }
-
-    DISPLAY_CLIENT {
-        string id PK
-        string name
-        string renderer_type
-        string status
-        string role
-        datetime lease_expires_at
-        datetime last_seen_at
-    }
-
-    IDEMPOTENCY_RECORD {
-        string scope PK
-        string key_hash PK
-        string request_hash
-        integer response_status
-        string deletion_result
-        datetime expires_at
-    }
-
-    OPERATOR_AUDIT_LOG {
-        integer id PK
-        string operator_id
-        string action
-        string target_type
-        string target_id_short
-        string result
-        datetime created_at
+    arrival_events {
+        text id PK
+        text memory_session_id FK
+        text replay_id UK
+        text replay_status
+        text checkpoint_id
+        timestamptz arrived_at
+        timestamptz queued_at
+        timestamptz photo_wait_until
+        text renderer_lease_id
     }
 ```
 
-`DISPLAY_CLIENT`は参加者データと関連付けない。描画機の接続監視だけに使用する。
-
-`IDEMPOTENCY_RECORD`は到着、停止、削除、描画完了の重複適用を防ぐ。キーそのものではなくハッシュ、操作スコープ、リクエスト内容のハッシュ、返却結果、有効期限を最大24時間保存する。同じキーで異なる内容が来た場合は競合として拒否する。両セッション削除の途中結果は確定結果として固定せず、再送ごとに未完了側だけ進める。削除記録はID、資格情報、写真、位置やセッション内容を含めず、両側の`deleted`/`pending`と完了状態を安全に再現できる短期receiptとする。
-
-`OPERATOR_AUDIT_LOG`は受付停止、再生、skip、fallbackなどの運営操作を記録する。生位置、参加トークン、完全な軌跡を含めず、対象IDも運営上必要な短縮表現にする。
-
-## PostgreSQL実装規約
-
-- セッション、写真、経路等のdomain entityの主キー・参照列は既存のプレフィックス付き不透明な`text` IDを保持する。UUIDv7への一括変更はせず、同じIDを使う外部キーの型も`text`で合わせる
-- 外部へ公開しない追加の連番が必要な監査・集計テーブルだけ、`bigint generated always as identity`を使用できる
-- すべての時刻列は`timestamp with time zone`としてUTCで保存する
-- 状態値は`text`と`check`制約を基本とし、アプリだけでなくDBでも未知の状態を拒否する
-- 外部キー列には参照・削除で使用するインデックスを作る。PostgreSQLは外部キー列のインデックスを自動作成しないため、migration reviewで漏れを検査する
-- Goは上限付き接続プールを共有し、リクエストごとにDB接続を作らない
-- migrationはGitで連番管理し、後方互換のあるexpand-contract方式で適用する。production起動時に破壊的migrationを自動実行しない
-- 期限削除や写真処理を複数workerで実行する場合は、短いトランザクションと`FOR UPDATE SKIP LOCKED`でjobを取得することを原則とし、オブジェクトストレージのAPI呼び出し中にDB lockを保持しない。ただし、以下の開発者承認済みBackend #6の単一インスタンスMVP例外を適用する
-- 日付partition、read replica、provider固有extensionはMVPで先行導入せず、実測した件数、query、VACUUM、復旧要件に基づいて判断する
-
-### Backend #6の写真保存実装
-
-対応PR適用後は、論理的なPhotoMomentとPhotoAssetを物理テーブル`photos`の1行で管理する。MemorySessionへの外部キーは`ON DELETE RESTRICT`とし、画像を消す前に親や削除先keyを失わない。`pending`/`ready`/`failed`/`deleting`状態、申告・検証対象メタデータ、任意の撮影時GPS、stage/final object key、受付順とアップロード発行期限を持つ。撮影時刻順の取得と受付順の一意性は区別する。
-
-`memory_sessions.deleting`は写真の新規登録・URL発行を止める内部的な削除フェンスであり、本人認証の`delete_after`を延長しない。無効画像は消去してから`failed`とし、GPSとobject参照を落とす。削除対象の行はcloud消去成功後にだけ削除する。短期の冪等性記録には内容のハッシュと一方向の写真locatorだけを入れ、URL・画像・GPS・平文の写真IDを保持しない。
-
-`photo_upload_fences`にはランダムなアップロード先keyと失効期限だけを保持し、MemorySessionへの外部キーは付けない。画像やGPSではなく、まだ有効なgeneration-zero PUTによる削除後の再作成を拒否するゼロバイトobjectの清掃記録である。写真完了・消去確定と同時にoutboxへ登録し、URL失効後にだけobjectと記録を消す。
-
-### 開発者承認済みMVP例外：写真の外部I/Oと直列化
-
-Backend #6では、写真完了・署名URL発行・消去・アップロードフェンス清掃に限り、PostgreSQL advisory lockを保持したまま必要なCloud Storage/IAM APIを呼び出す方式を開発者が選択・承認した。二重のDB/cloud更新と、消去中にフェンスが再作成されて追跡対象から外れる競合を、単純な直列化で防ぐためである。
-
-ロック順はMemorySession→object fenceとし、フェンス清掃はobject fenceだけを取得する。取得後に状態・期限を再読込し、外部消去とoutbox完了を同じ直列化区間へ含める。外部I/Oは既存のAPI 10秒・定期清掃10秒・起動/清掃コマンド30秒のcontext deadlineで制限し、失敗時は永続化済み`deleting`/outboxから再試行する。
-
-代償として外部I/O待ちがDB接続を占有する。最大1 APIインスタンス、既存の接続プール上限、受付停止の移行窓を維持し、実stagingで写真完了と削除の同時負荷・lock待ち・接続上限・期限超過と復旧を検証してから有効化する。複数APIへの拡張や負荷不成立時はこの例外を拡大せず、generation条件付き更新と処理claim/leaseによるロック外I/O方式を別途承認して移行する。
-
+optional ownerのidempotencyはMemory削除receipt等の全行がMemory FKを持つわけではない。`moment_route_segments`と`route_segments`の終端写真FKはnullableで、nullは到着終端に使う。GraphへのFKや`arrival_event_id`列を追加した図ではない。
 
 ## MemorySession
 
-写真、写真撮影時GPS、経路、到着演出、本人用ストーリーを管理する。LivePresenceSessionとは別の同意版、トークン、`expires_at`、`delete_after`を持つ。`expires_at`後は新規の追跡操作を受け付けず、本人の状態・写真の閲覧と自己削除は`delete_after`まで許可する。
+物理表は`memory_sessions`。status列やdisplay_alias列はない。APIの`main`／`arrived`／`ended`は停止・期限・到着の有無から求める。`consent_version`と`consent_language`、作成時刻、token hash、期限を保存する。
 
-## LivePresenceSession
+| 列 | 意味／追加migration |
+|---|---|
+| `deleting` | 003。旧画像消去中の書込み／閲覧フェンス。本人期限を延長しない |
+| `photo_sequence` | 003。写真受付の単調なsequence発行に使用 |
+| `push_stopped` | 005。参加停止・従来到着等で確定する終端通知停止。解除しない |
+| `campus_graph_version` | 009。新規受付時に固定。旧セッションはnullの場合がある |
+| `photo_mode` | 010。legacy／device。既存行をdeviceへ移行しない |
+| `stopped_at` | 017。参加停止の最初の時刻、再開なし |
+| `push_after_arrival` | 020。既定false。継続用の新同意版と一致する新Memoryだけtrue |
 
-通常GPSのベストエフォート表示だけを管理する。`expires_at`後は新規の位置送信を拒否して最新表示位置を破棄し、自己削除はLive自身の`delete_after`まで許可する。状態の読み取りは紐づくMemorySessionの本人用GETで行い、Memoryが先に削除された後はそのGETも提供しない。
+`push_after_arrival`は同意方針であり通知許可・購読そのものではない。migrationや設定後付けで旧Memoryをtrueへ変えず、期限・同意・本人資格・`push_stopped`も変更しない。
 
-- `tracking_status`: `tracking`、`stopped`、`expired`
-- `presence_phase`: `approaching`、`arrived`、`on_site`、`ended`
-- `on_site_consent_version`: 到着後に用途・範囲が変わる場合だけ必須
-- `display_alias`: MemorySessionと共有する場合もExperienceLink経由で短期連携する
+## Experience・ExperienceLink・旧Live
 
-## ExperienceLink
+| 物理表 | 列・関係 |
+|---|---|
+| `experiences` | text ID、unique Memory FK（CASCADE）、nullable unique Live FK（SET NULL）、旧display_color／symbol、created_at／expires_at／delete_after |
+| `experience_links` | text ID、unique Memory／Live FK（CASCADE）、token_hash、`token_expires_at`、関係の`expires_at` |
+| `live_presence_sessions` | token_hash、consent_version、旧on_site_consent_version、tracking_status、presence_phase、stop_reason、旧表示色・記号、display_id UUID、created／stopped／last_seen／expires／delete_after |
 
-同じ端末で両展示へ参加する場合だけ作る関連付け。色・記号と到着処理を連携し、Memory用Bearer tokenで本人向けGETがLiveの状態と期限を取得するための関係を保つが、写真、生GPS、経路、Live用トークンは返さない。連携用トークンの有効期限は`link_token_expires_at`で管理して到着・失効後に無効化し、関連付けは`expires_at`（両セッションのうち早い`delete_after`以下）まで残す。片方の削除時にも関連付けを削除する。追跡用`expires_at`到達だけでは消さない。
+新規MemoryにもExperienceは作るが、Live／link／aliasをAPIへ新規発行しない。旧リンク資格の期限と、本人状態に必要な関係の期限は別。migration 002は関係を両Sessionの早いdelete_afterまで保持する。片側削除でlinkを除去する。
 
-## LivePosition
+旧Liveのtracking_statusはtracking／stopped／expired、presence_phaseはapproaching／arrived／on_site／endedがschemaに残るが、新規GPS・on_site継続は無効。Live自身のBearerはMemory削除後もLiveのdelete_afterまで照会・停止・削除できる。
 
-LivePresenceSessionごとに最大1件の最新表示位置を持つ論理エンティティ。受信した生緯度経度はgeofence・異常値検証と座標変換後に破棄する。単一Go Backendインスタンスのプロセスメモリで30〜60秒TTLを設定し、プロセス再起動時は消失してよい。参加端末が次の最新位置を送信した時点で表示を再開する。複数Backend化するときだけRedis互換TTLストアへ移し、PostgreSQLに`live_positions`テーブルや位置履歴を作らない。既存の同名テーブルがある環境ではBackend側の002 migrationで除去する必要がある（本書はmigration適用済みとは主張しない）。
+## device写真metadataと経路
 
-| 項目 | 型 | 内容 |
-|---|---|---|
-| `accuracy_m` | float | ブラウザが返す推定誤差 |
-| `local_x` / `local_z` | float | 量子化・ぼかし済みの表示座標 |
-| `recorded_at` | datetime | 端末で取得した時刻 |
-| `received_at` | datetime | Backendが受信した時刻 |
-| `expires_at` | datetime | 30〜60秒後の失効時刻 |
+`photo_moments`には上図の9列だけを持ち、画像バイト、画像hash、容量、寸法、EXIF、GPS、object key、upload statusを持たない。`id_hash`と`request_hash`は画像のhashではなく、ID検索・登録入力の照合用。`(memory_session_id,client_photo_id)`と`(memory_session_id,sequence_no)`はunique。一覧はcaptured_at／sequence_no順で、受付順と撮影時刻を区別する。
+
+`photo_moment_fences`はMemory FKとclient_photo_idの複合PK。写真個別削除後に古い送信で同じclient IDが復活するのを防ぎ、Memory削除時にCASCADEする。画像やチェックポイントを残す表ではない。
+
+`moment_route_segments`はid、Memory FK、開始写真FK、任意の終端写真FK、coordinate／Graph／3D Map版、algorithm_version、confidence、path(JSONB)、path_node_ids(JSONB)、length_mを持つ。開始／終端写真は`photo_moments`を参照し、CASCADE。device経路は`checkpoint-dijkstra-1`。最後の写真→到着はto_photo_moment_id=nullで、到着表のcheckpoint_id／arrived_atから生成する。再視聴のqueued_atを経路終端時刻にしない。
+
+追加・削除と経路再構成を同transactionで行う。本人memory GETはREPEATABLE READ・read onlyの同一snapshotで写真と経路を読み、途中の写真変更・期限削除による異時点混在を避ける。
+
+## 旧PhotoMoment・PhotoAssetに相当する物理保存
+
+旧画像は単一の`photos`行で管理し、独立した`photo_assets`表はない。003の列はID／id_hash、Memory FK（ON DELETE RESTRICT）、client ID、request hash、captured／created／delete_after／upload_expires_at、任意GPS4列、MIME／sha256／size／width／height、sequence_no、upload_attempts、status、stage_key／object_key、failure_code／delete_target。008で任意checkpoint_id／campus_graph_versionを追加した。
+
+statusはpending／ready／failed／deleting。新規device構成ではこれらのupload状態へ遷移する写真を作らないが、旧画像消去・失敗処理には必要。消去に失敗した画像を行ごと失わないため親FKはRESTRICT。Memoryのdeletingを確定して新しい閲覧・書込みを止め、GCS消去を確認してから行を消す。
+
+`route_segments`は旧`photos`への開始／終端FK（CASCADE）を保ち、Memory FK、3種の版、algorithm_version、confidence、path、length_m、created_at、009追加のpath_node_idsを持つ。旧GPS由来区間のalgorithmは`photo-edges-dijkstra-1`。device経路表へ付け替えない。
+
+`photo_upload_fences(object_key PK,not_before)`にはSession FKを付けない。未失効のgeneration-zero PUTで削除写真が復活しないようゼロバイトobjectを維持し、URL失効後にobjectと記録を消すoutbox。Memory削除後も清掃が必要なランダムkey・期限だけを持ち、画像・GPS・写真FKを残さない。
+
+旧写真外部I/Oは既存の単一インスタンス実装でSession／object fenceのadvisory lockとcontext期限を用いる。新規device metadataにGCS処理を追加しない。
 
 ## ArrivalEvent
 
-到着はセッションにつき最大1件とする。二重送信は同じ結果を返す。
+`arrival_events`はMemory FKをuniqueにして初回到着を1行に限定する。sourceはqr。rootの`id`／`arrived_at`／`checkpoint_id`と、現在の公開`replay_id`／`queued_at`を分ける。再視聴や運営障害retryで行を増やさず後者と再生状態を更新する。
 
-- `source`: `qr`、`nfc`、`operator`
-- `replay_status`: `queued`、`playing`、`completed`、`skipped`
-- `checkpoint_id`: 到着場所の識別子。署名付き証明そのものは保存しない
-- `skip_reason`: `participant_request`、`timeout`、`renderer_failure`、`operator`
+- replay_status: queued／playing／completed／skipped。
+- photo_wait_until、replay_started_at、replay_finished_at、renderer_lease_id、skip_reasonを保存する。
+- migration 013でreplay_deadlineを削除し、全体1 playingの部分unique indexを追加。通常待機30秒skipは現行仕様ではない。
+- 019でreplay_id／queued_atをNOT NULLとし、旧行をid／arrived_atでbackfill。queued indexはqueued_at,id順。
+- skip_reasonのschemaには過去互換値も残る。列のenum候補だけから現在の待機期限・queue-full skipを推定しない。
 
-到着の受付ではMemorySessionへArrivalEventを作成し、ExperienceLinkが有効な場合だけ対応するLivePresenceSessionの`presence_phase`を`arrived`へ更新する。LivePresenceSessionのGPS送信は自動停止せず、参加者が停止するか、追加同意して`on_site`へ進む。再生状態はArrivalEventだけを正とし、MemorySessionへ`replaying`を重複保存しない。
+## 冪等性・proof・描画用の実在表
 
-## PhotoMoment・PhotoAsset
-
-`PhotoMoment`は参加者が残した撮影イベント、`PhotoAsset`は非公開オブジェクトストレージ上の加工済み画像を表す。写真EXIFは保存せず、撮影時位置はブラウザの位置APIから別項目として受け取る。
-
-| 項目 | 内容 |
+| 表 | 主な列と保持 |
 |---|---|
-| `sequence_no` | セッション内の撮影順。unique |
-| `location_source` | `captured_gps`、`interpolated`、`unknown` |
-| `snapped_edge_id` | map matchingで採用したCampusEdge。未確定ならnull |
-| `object_key` | 推測困難な非公開オブジェクトキー。URLではない |
-| `content_hash` | アップロード重複・破損検出用。公開しない |
-| `status` | `pending`、`ready`、`failed`、`deleting` |
-| `visual_features` | 公開表現に使う復元性の低い主要色等。画像内容の人物・物体分類は行わない |
-| `delete_after` | セッション削除期限以下。独立して延長しない |
+| `idempotency_records` | scope＋key_hash複合PK、request_hash、response_status、response_body BYTEA、expires_at、任意Memory FK。一般操作は最大24時間。Memory所有分はdelete_after以下・CASCADE |
+| `arrival_receipts` | Memory＋key_hash複合PK、request_hash、response_body BYTEA、expires_at。初回到着の入力照合とroot locator。24時間 |
+| `arrival_replay_receipts` | Memory＋key_hash複合PK、request_hash、response_body BYTEA。再視聴の成功応答をMemory削除まで保持、expires_at列なし |
+| `arrival_proof_uses` | Memory＋proof_fingerprint複合PK。64文字SHA-256のみ。初回／再視聴を通じMemoryごと同proofの新規受理を1度に制限、Memory削除でCASCADE |
+| `display_cursor` | singleton、last_id。状態mutationとsnapshotの切断面を直列化 |
+| `display_events` | bigint id PK、kind、data JSONB、occurred_at。公開投影だけ、永続連番差分 |
+| `display_primary_lease` | singleton、lease_id、holder_id、expires_at。接続と推測困難なlease IDでfenceする |
+| `display_renderer_receipts` | event_id PK、lease_id、kind、arrival_id、result、created_at。renderer再送照合 |
 
-写真は1セッション12枚までを暫定上限とする。原画像をそのまま保存せず、向き補正、EXIF除去、長辺1920px以下への縮小、再エンコード後の画像だけを保存する。写真単位削除では、PhotoMoment、PhotoAsset、派生特徴を削除し、前後のRouteSegmentを再生成または未確定にする。
+描画のarrival_idは現在のreplay_id。初回root IDを使って新世代へフォールバックしない。差分dataにMemory ID、本人token、画像URL、raw proof、生GPSは入らない。`DISPLAY_CLIENT`や`LIVE_POSITION`は現行物理表ではない。display leaseは単一行であり、接続数はGoメモリの値である。
 
-## RouteSegment
+## PushSubscription・運営制御
 
-前の写真から次の写真、または最後の写真から到着点までの再構成経路。
+`push_subscriptions`はMemory FKをPK（CASCADE）、endpoint_encrypted／keys_encrypted BYTEA、interval_minutes、status、next_send_at、expires_at。011以後intervalは30のみ。status activeならnext_send_at必須、pausedはnull。endpoint・鍵はAES-GCM暗号化し、VAPID秘密鍵と暗号化鍵を分ける。
 
-- `from_photo_id`: 区間開始のPhotoMoment
-- `to_anchor_type`: `photo`または`arrival`
-- `to_anchor_id`: 次のPhotoMomentまたはArrivalEvent
-- `graph_version`: 使用したCampusGraphの版
-- `confidence`: `high`、`medium`、`low`
-- `path_local_points`: 表示用のローカル座標列。生緯度経度を含めない
+| 表 | 内容 |
+|---|---|
+| `registration_control` | singleton、closed_at。永続受付停止 |
+| `notification_control` | singleton、stopped_at。全購読消去と通知停止、再起動で解除しない |
+| `display_fallback_control` | singleton、mode、switch_at、changed_at。modeはnormal／pending／fallback、pendingだけswitch_atあり |
+| `operator_credentials` | id、unique token_hash、actor_id、email_hash、origin、role=operator、created_at／expires_at。最長2分 |
+| `arrival_operator_audit` | identity bigint id、operator_id、operator_email_hash（旧行nullあり）、action、target_id_short、result、created_at。個人を後付けせず24時間清掃 |
+| `schema_migrations` | migrationの連続適用履歴。起動・ready・各API・cleanupで対応する最終版との一致を確認 |
 
-生成時に参照する位置は区間両端の写真撮影時GPSだけとし、通常GPS点列を入力・保存しない。同じ入力と`graph_version`から再生成できるよう、経路生成アルゴリズムの版も設定またはメタデータへ記録する。
+運営資格の生token、Google token、生メール、subはDBに保存しない。描画用displayTokenは独立署名資格で、operator_credentials行として保存しない。
 
-## PhotoHotspotBucket
+## CampusNode・CampusEdge・座標
 
-写真撮影地点を5〜10m単位で量子化し、一定時間窓で集計した公開用の非個人データ。個別写真ピンは永続テーブルを持たず、PhotoMomentの準備完了イベントから短時間だけ生成する。
+固定GraphはBackendの`internal/route/campus_graph.json`とFrontendの`models/trace/campus_graph.json`に同梱する。DBのcampus_nodes／campus_edges表や動的ホットスポット表はない。Graphのnode／edge・3D Mapの互換版と変換は[座標仕様](coordinate-mapping.md)を参照。
 
-- 個別ピンのペイロードには写真、画像URL、生GPS、セッションID、正確な時刻を含めない
-- 個別ピンは15〜30分以内に失効し、少人数時は遅延、追加量子化、短時間表示、非表示のいずれかを適用する
-- `active_photo_count`が3件以上のbucketだけをフォトスポットとして公開する
-- 写真単位またはMemorySession全体の削除時は寄与数を減算し、3件未満になれば直ちに公開を止める
-- `coordinate_version`、`three_d_map_version`が公開中の組み合わせと一致しないイベントは描画しない
+migration 002でlive_positions表を削除。旧Liveの最新位置はGoプロセスメモリのTTL清掃対象で、新規書込み・公開描画への投影は行わない。DBに新規位置履歴を作らない。
 
-## PushSubscription
+## 端末データ
 
-MemorySessionに紐づく任意参加の撮影リマインダー。ブラウザの購読エンドポイントと鍵は暗号化し、通知本文に場所、写真、参加記号、経路を含めない。到着、停止、購読解除、期限切れの最も早い時点で無効化・削除する。通知時刻は厳密な保証をせず、端末内タイマーを補助表示として使える。
+FrontendのIndexedDB名は`trace-ping-log`、version 2、object storeは`entries`（keyPath=id）。レコードのschema version 3は別概念で、自己申告placeを持ち、新規位置fixを入れない。LogEntryはrecord、JPEG Blob、sentAt、任意memorySessionId／photoMomentId等。photoMomentIdの未設定はmetadata送信前、nullは到着後撮影などで送信対象外。
 
-## CampusNode・CampusEdge
-
-キャンパス内の歩行可能経路を表すバージョン付きグラフ。CampusEdgeは距離、屋内外、階段、スロープ、エレベーター、利用時間、通行止め、バリアフリー可否を属性として持つ。公開中のグラフを直接上書きせず、新しい版を検証してから切り替える。
-
-## インデックス
-
-- `memory_sessions(delete_after)`
-- `live_presence_sessions(tracking_status, presence_phase, expires_at)`
-- `live_presence_sessions(delete_after)`
-- `experience_links(memory_session_id)` unique
-- `experience_links(live_presence_session_id)` unique
-- `experience_links(expires_at)`
-- `arrival_events(replay_status, arrived_at)`
-- `photo_moments(memory_session_id, sequence_no)` unique
-- `photo_moments(photo_asset_id)` unique
-- `photo_assets(delete_after, status)`
-- `route_segments(memory_session_id, started_at)`
-- `photo_hotspot_buckets(coordinate_version, three_d_map_version, spatial_bucket_id, window_started_at)` unique
-- `photo_hotspot_buckets(expires_at)`
-- `push_subscriptions(status, next_send_at)`
-- `campus_nodes(graph_version)`
-- `campus_edges(graph_version, enabled)`
-- `display_clients(last_seen_at)`
-- `idempotency_records(scope, key_hash)` unique
-- `idempotency_records(expires_at)`
-- `operator_audit_logs(created_at)`
-
-実装時は、期限・queue走査のqueryに合わせて次の部分インデックスを優先する。
-
-- `photo_assets(delete_after) where status in ('pending', 'deleting')`
-- `arrival_events(arrived_at) where replay_status = 'queued'`
-- `push_subscriptions(next_send_at) where status = 'active'`
-- `memory_sessions(delete_after) where delete_after is not null`
-- `live_presence_sessions(expires_at) where tracking_status = 'tracking'`
-
-同じ列へfull indexとpartial indexを重複して作らず、`EXPLAIN`と実測で採用する索引を決める。
+同端末の旧schema 1／2の精度・写真記録は閲覧・削除用に残り、新規GPS取得／再送は行わない。deviceId等が端末型にあることをGoが収集する仕様に読み替えない。写真は上限12枚・30MiB、サーバー送信成功でも画像を消さず本人の作品に使う。ブラウザ消去・端末故障に対するサーバー画像バックアップはない。
 
 ## 削除
 
-1. LivePresenceSessionの`expires_at`到来時は`expired`にし、LivePositionを削除し、位置送信を拒否する。状態取得・自己削除用トークンとExperienceLinkの関連付けは`delete_after`まで維持する
-2. 各Sessionの`delete_after`到来時は、該当Sessionの写真・経路・到着・PushSubscription等の関連データ、トークン、対応するExperienceLinkを削除対象にする
-3. 写真が寄与したPhotoHotspotBucketを減算し、公開条件を下回ったbucketを非公開にする
-4. 非公開オブジェクトストレージ上の写真を削除し、成功を確認する
-5. DBレコードをトランザクション内で削除する。オブジェクト削除失敗時は`deleting`として再試行し、期限超過をアラートする
-6. 参加者画面は「写真の思い出を削除」「リアルタイム参加を削除」「両方を削除」を分け、両方の場合も各削除を独立に完了・再試行できるようにする
-7. 個人を復元できない集計値だけを残す場合は、大学への説明と同意文へ明記する
+1. 参加期限到来は新規操作・描画・通知を終えるが、本人閲覧・削除資格はdelete_afterまで維持する。停止も期限を変更しない。
+2. Memory個別削除はdevice metadata／経路／fence／到着／receipt／proof消費／Push等を所有関係に従って消す。旧画像はGCS消去確認を先行し、失敗時deletingで再試行する。
+3. Live個別削除はMemory写真を消さない。Memory個別削除もLiveを消さない。ExperienceLinkは片側削除で除去する。
+4. 一括削除は両資格を要求し、Live→Memoryを独立確定。部分成功receiptで未完了側だけ再試行する。Session削除用の短期receiptを所有FKで先に消して再送不能にしない。
+5. 期限到来とcleanup成功は別。API起動時／30秒周期と別途cleanupコマンドの存在だけでは実削除済みと主張しない。旧GCS／upload fence・API／cleanupの権限を残す。
+6. 端末写真・本人書出し画像・インフラログ／バックアップは別の保存範囲。サーバー削除だけで全端末画像が消えたとしない。
 
-インフラのセキュリティログとバックアップはDB削除と同時に個別レコードを消せない場合があるため、原則として生位置を含めず、別途定めた短い保持期限で世代ごと削除する。
+## 実装参照
+
+- [migration一覧001〜020](https://github.com/Mino829/TRACE_B/tree/6b87961/internal/store/migrations)（特に002、003、008〜010、013、017〜020）
+- [Memory停止・receipt期限](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/memory_sessions.go)、[device写真・経路](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/photo_moments.go)
+- [初回到着](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/arrivals.go)、[再視聴・proof消費](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/arrival_replay.go)、[描画snapshot・lease](https://github.com/Mino829/TRACE_B/blob/6b87961/internal/store/display.go)
+- [端末IndexedDB](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/lib/ping-log/store.ts)、[端末レコード型](https://github.com/Mino829/TRACE_F/blob/be94bd2/src/lib/ping-log/record.ts)

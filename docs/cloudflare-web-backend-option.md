@@ -1,67 +1,66 @@
-# Cloudflare Web + Google Cloud Backend 配置比較の記録
+# Cloudflare Web + Google Cloud Backend 配置比較の記録（完成版）
 
-- 記録日: 2026-10-13、採用判断: 2026-10-21（Issue #10）
-- 状態: 比較案のうちCloudflare Web + Google Cloud東京を技術構成として採用。本番配置・大学承認・公開完了ではない
-- 対象: 参加者向けWeb App、Go Backend、正本DB、写真保存、描画接続
-- 現在の正本: [インフラ・データベース方針](infrastructure-database-decision.md)。以下は採用に至る比較と検証履歴
+- 更新日: 2026-11-06
+- 比較記録: 2026-10-13、技術配置の採用判断: 2026-10-21（設計Issue #10）
+- 現行正本: [インフラ・データベース方針](infrastructure-database-decision.md)
+
+会期は終了した。本書は採用に至った比較と完成時点の判断を記録し、未採用案の実装や再展示・公開を指示しない。実装の存在・過去配備記録と、正式承認・現在の稼働/停止・清掃完了は別である。
 
 ## 検討の背景
 
-`trace_Frontend`の`main`には位置精度調査用の`/log`があり、Cloudflareの静的アセット用`trace-log`と、通知・記録用`trace-push` Workerを使うデモが稼働している。Workerは調査記録をD1、添付写真をKVへ保存する。これらは本番の写真メモリーやリアルタイム存在表現の正本ではない。
+当初のVercel + Google Cloud案に対し、既存のCloudflare静的配信を再利用するためサイトWorker中継を採用した。Next.js静的書き出しへリクエスト依存のNode.js Route Handlerをそのまま配置する案ではなく、Workerが許可リストを持ってGoへ中継する。
 
-過去の`mino/demo`ブランチの`/api/backend/[...path]`はNode.jsのNext.js Route Handlerであり、静的書き出し方式へそのまま載せられなかった。この制約からサイトWorker中継を実装した。
-
-Go BackendはPostgreSQLを使うHTTPサーバーとして実装され、OCIコンテナとCloud Run / Cloud SQLの配置手順、検証環境向けCI/CDがある。写真・到着QR・描画WebSocket等の実装と本番統合は別途検証が必要で、サーバー配置だけではMVPの全導線は成立しない。
+旧`trace-log`、通知・調査用`trace-push`とD1/KVは独立した調査系である。完成版の本番Worker `trace-production`へ旧参加資格・鍵・D1/KV・写真を移行するものではない。
 
 ## 採用した案
 
-```text
-参加者スマートフォン
-  -> Cloudflare: 静的Web App、同一オリジンAPI中継Worker
-     -> Google Cloud東京: Go API（Cloud Run）
-       -> Cloud SQL for PostgreSQL: 本番の正本データ
-       -> 非公開Cloud Storage: 加工済み写真
-会場のUnity / TouchDesigner
-  -> Go Backendへ外向きWSS接続（描画WebSocket実装後）
-Cloud Scheduler -> Cloud Run Job: 保存期限の清掃
-```
+採用した完成構成の図は[システム構成](architecture.md)、配置・資格の契約は[インフラ方針](infrastructure-database-decision.md)を参照する。以下は旧比較から現在の構成へ移った判断の記録である。
 
-- Web AppはCloudflareのサイトWorkerで静的書き出しを配信する。動的なNext.js Route Handlerは使わない。追加のサーバー機能が必要な場合は別途設計する
-- Go Backend、正本PostgreSQL、写真本体はGoogle Cloud東京にまとめる。大学の審査で別構成が必要な場合はAWS等の代替案を再決定する
-- `trace-push`のD1/KVは位置精度調査に限定する。本番の参加者データへ流用せず、通知購読の本番保存先も別途決定する。D1/KVの東京保存・処理を保証しない
-- `local`、`staging`、`production`の設定、データ、資格情報を分離する。本番データをデモや検証環境へコピーしない
+- 固定公開設定は`push-worker/production.public.json`。会期中の本番URLは`https://trace-production.async5855.workers.dev`、Goは`trace-fes-2026`の東京Cloud Runへの配備記録がある。現在の稼働確認ではない。
+- 新規写真は自己申告の固定Graph地点を選び、Goには`clientPhotoId/checkpointId/capturedAt`だけを送る。新規画像upload、GPS取得/送信、Live作成・位置書込み、Unity/TouchDesigner、写真ピン/フォトスポットは完成版の機能ではない。
+- 旧Liveと旧クラウド写真の本人権利・`deleteAfter`清掃、旧署名PUTのfenceを維持する。GCSを「新規写真を保存する現行構成」と説明しない。
+- production/local/stagingと旧調査系のデータ・secret・originを分け、本番データを試験へ複製しない。
 
 ## WebとGoの通信境界
 
-静的書き出しとサイトWorkerの同一オリジン`/api/backend/*`中継は実装済み。許可したパス・メソッド、JSONサイズ、転送ヘッダー、エラー応答を限定する。Goは共有シークレットを`/v1/*`で照合する。参加者Bearerは別の認証であり、シークレットをブラウザへ渡さない。採用決定は既存実装の本番疎通の証明ではない。
+参加者通信は同一originの`/api/backend/*`で、Workerが許可メソッド・パス・JSONサイズ・headerを限定し、Edge secretを付与する。参加者Bearerは別認証。画像をWorker経由にしたり、GCSへ新規直接PUTしたりしない。
 
-写真メタデータAPIはWorkerの許可リストを拡張する必要がある。画像本体は短期署名URLでCloud Storage東京へ直接PUTする契約であり、Workerの16KB JSON制限を通さない。Cloud Storage側のCORSと署名URL・削除を公開前に試験する。
+本番`/api/operator/*`は個人運営資格の発行・失効・到着proof取得専用で、status、受付close、通知stop、fallback等を通す一般管理proxyではない。それらの終了操作には、権限・許可Origin・Edge保護を備える別の認可済み運営入口の確認が必要となる。本番展示PCへloopback brokerやEdge secretを配布しない。
 
-直接Go APIをブラウザから呼ぶ方式は採用しない。共有シークレットはWorker経由の制限であり、参加者認証やレート制限を代替しない。既存stagingはIAM保護中でWorkerからは共有secretだけでは到達できない。大学承認、直接到達拒否・E2E試験まで公開権限は変更しない。描画用WSSの経路・専用認証は別途決める。
-
-Cloud RunのWebSocketにはリクエスト時間の上限がある。描画クライアントに再接続と状態再同期を実装し、単一インスタンスを維持する。
+描画資格発行とWSSはブラウザからGoへ直接接続する。Google本人確認から得るdisplayTokenとoperator credentialは独立し、署名鍵・Edge secretも兼用しない。Cloud Runの接続時間上限に対し、短命資格の再発行、再接続、snapshot全置換、単一主leaseで整合させる。共有secretはCloud Run IAMや正式公開承認を代替しない。
 
 ## 全部Cloudflareに置く案との比較
 
-| 案 | 利点 | 追加の作業・制約 |
-|---|---|---|
-| Cloudflare Web + Google Cloud Backend | 稼働中のWeb配信を活かし、Go/PostgreSQLの実装と東京配置方針を維持できる | 2サービス間の認証、公開経路、リリース、監視を統合する |
-| Cloudflareへ全面移行 | アプリ運用の窓口をまとめられる可能性がある | GoにはContainers等が必要。現時点のContainersには組み込みの自動スケーリングがなく、配置指定はAPAC単位。D1は既存PostgreSQLの置き換えではなく、移行するならスキーマと処理を書き直す。写真保存とWebSocket配信も再設計する |
-| 既存のVercel + Google Cloud方針 | 文書と配置手順の変更が少ない | 現在のCloudflareデモとはWebの運用が分かれる |
+以下は当時の比較であり、外部サービスの2026-11-06時点の機能を再調査した結果ではない。
 
-CloudflareのD1/R2の`apac`指定は東京保存の保証ではない。保存地域が承認条件になる場合は、利用サービスごとに保証範囲を確認する。費用の優劣は利用量、常時接続数、写真容量が決まってから見積もる。
+| 案 | 当時の利点 | 当時の課題・現在の判断 |
+|---|---|---|
+| Cloudflare Web + Google Cloud Backend | 静的配信を再利用し、Go/PostgreSQLと東京の正本配置を維持 | 採用。2提供者の認証・リリース・監視・費用を分けて管理 |
+| Cloudflare全面移行 | 運用窓口を集約できる可能性 | 未採用。Go実行基盤、PostgreSQL相当への移行、WSS/lease/清掃を再設計する必要がある。D1は既存DBの無変更置換先ではない |
+| Vercel + Google Cloud | 初期案との文書差分が小さい | 未採用。別Web実行環境を増やす理由がなくなった |
+| AWS東京Backend | 提供者変更時の再検討先 | 現行採用先ではない。承認・移行・費用の別判断が必要 |
+
+Cloudflareの配置ヒントやAPAC指定を東京保存の保証としない。DB/旧bucketが東京でもCloudflareの通信・ログ、認証・Pushを含む全処理が東京とはいえない。大学の審査・保持条件はサービス単位で確認する。
 
 ## 公開前に残る確認
 
-1. 大学が承認するWeb、API、DB、写真、調査ログの運用者と保存・処理地域を確認する。東京に置くDBとbucket以外の処理まで東京とは主張しない。
-2. 静的書き出し＋Worker中継と既存`/log`の共存をstagingで試す。IAM保護されたstagingを安易に一般公開しない。
-3. 独自ドメイン・DNS/TLS・WAF/レート制限・監視の責任分担、Go APIの公開経路、描画WSS、通知購読の保存先を確定する。
-4. Cloud Run / Cloud SQLのstagingで、参加開始・位置送信・停止・削除をCloudflare側WebからE2E試験する。写真・到着・描画は実装後に追加試験する。
-5. WebSocket再接続、期限削除、DB接続上限、監視、ロールバック、50同時追跡と60セッション相当を試す。予算上限5,000円に対する内訳と大学・個人情報承認を記録する。
+見出しは旧参照用に維持する。現在は「開場までの未実装一覧」ではなく、会期後保守・再配備/再展示時に確認すべき事項である。
+
+1. 現在の実資源、CI有効状態、受付/通知停止、期限清掃成功、旧画像/fence残数を確認する。停止は[終了手順](deployment-operations.md#終了手順)の順で判断する。
+2. Frontend mainの検証成功後本番自動配備と、Backendの条件付き閉鎖staging自動更新を区別する。会期終了で無効になったとはしない。
+3. 本人閲覧・削除期限と清掃が残る間にGo/DB/GCS権限を切らない。端末写真とサーバーmetadataの削除を別に扱う。
+4. 実Google、実スマートフォン、投影機材、実Push、長時間運転、復旧・費用、正式同意承認の証跡を確認する。過去UI smokeやテストコードの存在を全項目合格としない。
+5. Backend #53の費用停止・共通アカウント資源整理は完了未確認。アラートや最小インスタンス0を課金ゼロとしない。
 
 ## 参照した公式資料
 
-- [Next.js: Static Exports](https://nextjs.org/docs/app/guides/static-exports) — リクエストに依存するRoute Handlerは静的書き出しの対象外
-- [Cloudflare: Containers FAQ](https://developers.cloudflare.com/containers/faq/)・[Placement](https://developers.cloudflare.com/containers/concepts/placement/) — Goコンテナの運用と配置制約
-- [Cloudflare: D1 Data Location](https://developers.cloudflare.com/d1/configuration/data-location/)・[R2 Data Location](https://developers.cloudflare.com/r2/reference/data-location/) — 位置ヒントと保存地域の保証範囲
-- [Google Cloud: Cloud Run WebSockets](https://docs.cloud.google.com/run/docs/triggering/websockets) — 接続時間、再接続、複数インスタンス
+比較時に参照した資料。サービスの再選定時には最新条件を再確認する。
+
+- [Next.js: Static Exports](https://nextjs.org/docs/app/guides/static-exports)
+- [Cloudflare: Containers FAQ](https://developers.cloudflare.com/containers/faq/)・[Placement](https://developers.cloudflare.com/containers/concepts/placement/)
+- [Cloudflare: D1 Data Location](https://developers.cloudflare.com/d1/configuration/data-location/)・[R2 Data Location](https://developers.cloudflare.com/r2/reference/data-location/)
+- [Google Cloud: Cloud Run WebSockets](https://docs.cloud.google.com/run/docs/triggering/websockets)
+
+## 現行実装の根拠
+
+[Frontend README](https://github.com/Mino829/TRACE_F/blob/be94bd2/README.md)、[本番固定設定](https://github.com/Mino829/TRACE_F/blob/be94bd2/push-worker/production.public.json)、[Worker許可経路](https://github.com/Mino829/TRACE_F/blob/be94bd2/push-worker/src/site.ts)、[Backend README](https://github.com/Mino829/TRACE_B/blob/6b87961/README.md)。配置比較の採用と実配備・承認を混同しない。
